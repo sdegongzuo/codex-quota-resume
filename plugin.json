@@ -1,0 +1,16 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "codex-quota-resume",
+  "version": "0.1.0",
+  "description": "五小时额度恢复后自动继续 Codex 桌面聊天",
+  "extensions": {
+    "com.openai": {
+      "hooks": "./hooks/hooks.json",
+      "onboardingSkill": "./skills/quota-resume/SKILL.md",
+      "interface": {
+        "displayName": "额度恢复自动继续",
+        "shortDescription": "五小时额度恢复后续跑原聊天"
+      }
+    }
+  }
+}

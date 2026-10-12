@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "SessionStart": [{ "hooks": [{
+      "type": "command",
+      "command": "\"${PLUGIN_ROOT}/scripts/run.cmd\" \"${PLUGIN_ROOT}/scripts/control.mjs\" hook",
+      "statusMessage": "连接额度恢复监测"
+    }] }],
+    "UserPromptSubmit": [{ "hooks": [{
+      "type": "command",
+      "command": "\"${PLUGIN_ROOT}/scripts/run.cmd\" \"${PLUGIN_ROOT}/scripts/control.mjs\" hook",
+      "statusMessage": "登记当前聊天的额度恢复监测"
+    }] }]
+  }
+}

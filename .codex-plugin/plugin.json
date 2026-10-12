@@ -1,0 +1,7 @@
+{
+  "name": "codex-quota-resume",
+  "version": "0.1.0",
+  "description": "五小时额度耗尽后等待官方重置时间，恢复后自动继续已启用的 Codex 桌面聊天。",
+  "skills": "./skills/",
+  "hooks": "./hooks/hooks.json"
+}

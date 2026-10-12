@@ -1,0 +1,8 @@
+{
+  "name": "local-quota-resume",
+  "interface": { "displayName": "本地额度恢复插件" },
+  "plugins": [{
+    "name": "codex-quota-resume",
+    "source": { "source": "local", "path": "./" }
+  }]
+}

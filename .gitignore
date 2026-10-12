@@ -1,0 +1,30 @@
+# Dependencies and generated output
+node_modules/
+coverage/
+dist/
+*.log
+
+# Local test receipts may contain desktop or account metadata
+.test-evidence/
+
+# Local runtime data; never commit chat IDs, pipes, or account state
+data/
+.runtime/
+runtime.json
+config.jsonl
+state.jsonl
+events.jsonl
+
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Local editor and operating-system files
+.idea/
+.vscode/
+Thumbs.db
+Desktop.ini
+.DS_Store
