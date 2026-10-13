@@ -109,13 +109,16 @@ export function startPanel({ host = '127.0.0.1', port = 0, configPath, statePath
           timestamp: sample.timestamp ?? null, stale,
           completionDelaySeconds: delay ?? sample.completionDelaySeconds ?? null,
           reason: sample.reason ?? null,
-          compactionStatus: state.compactionByTarget?.[threadId]?.status ?? 'unsupported',
-          compactionReason: state.compactionByTarget?.[threadId]?.reason ?? '未发现经过验证的桌面实际压缩接口',
+          compactionStatus: state.compactionByTarget?.[threadId]?.status
+            ?? (capabilities.compaction === 'connected_unverified'
+              ? '桥接已认证，真实效果尚未验收' : 'unsupported'),
+          compactionReason: state.compactionByTarget?.[threadId]?.reason ?? capabilities.limitation,
         };
       });
       const compactionLabels = { unsupported: '不支持', not_thresholded: '未达到阈值',
         waiting_boundary: '等待安全边界', compacting: '压缩进行中', completed: '压缩已确认',
         uncertain: '压缩结果待核对', quota_unavailable: '额度许可未确认',
+        connected_unverified: '桥接已认证，真实效果尚未验收',
         above_threshold_after_compaction: '压缩后仍高于阈值' };
       return json(response, 200, { config: safeConfig, items, connection, capabilities, contextUsage,
         compaction: { ...compaction, status: compactionLabels[compaction.status] ?? compaction.status } });

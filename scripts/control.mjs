@@ -195,13 +195,18 @@ if (command === 'enable') {
       recoveryRetrySeconds: settings.recoveryRetrySeconds ?? config.recoveryRetrySeconds,
       intervalSeconds: settings.intervalSeconds ?? config.intervalSeconds }, null, 2));
 } else if (command === 'panel') {
+  const initialNative = await nativeBridge(configuration(configPath));
+  const nativeVerified = initialNative?.verified === true;
   const capabilities = { usage: 'verified', threadSnapshot: 'verified',
-      activeContextUsage: 'available', contextUsageSource: 'rollout_jsonl_read_only',
-      compaction: 'unsupported', liveTurnEvents: 'unsupported',
-      limitation: '已监测会话可读取单次上下文用量，实际压缩与停止接口尚未接通。' };
-    const initialNative = await nativeBridge(configuration(configPath));
-    const panel = startPanel({ configPath, statePath, capabilities, onGlobalEnabled: async () => launchWatcher(),
-      onStop: initialNative ? async operation => {
+    activeContextUsage: 'available', contextUsageSource: 'rollout_jsonl_read_only',
+    nativeBridge: nativeVerified ? 'authenticated' : 'unavailable',
+    compaction: nativeVerified ? 'connected_unverified' : 'unsupported',
+    liveTurnEvents: nativeVerified ? 'metadata_connected_unverified' : 'unsupported',
+    limitation: nativeVerified
+      ? '原生桥接已通过认证快照，并可读取后端轮次元数据；完整 turn 事件流和正文未订阅，真实压缩及中止效果尚未验收。'
+      : '已监测会话可读取单次上下文用量；当前没有通过认证的原生桥接，压缩与中止不可用，后端轮次元数据尚未接入。' };
+  const panel = startPanel({ configPath, statePath, capabilities, onGlobalEnabled: async () => launchWatcher(),
+      onStop: nativeVerified ? async operation => {
         const native = await nativeBridge(configuration(configPath));
         if (!native) return { status: 'connection_unavailable' };
         return native.perform({ ...operation, action: 'interrupt' });
