@@ -3,6 +3,6 @@
   "interface": { "displayName": "本地额度恢复插件" },
   "plugins": [{
     "name": "codex-quota-resume",
-    "source": { "source": "local", "path": "./" }
+    "source": { "source": "local", "path": "./.codex-distribution/0.2.1-r1/codex-quota-resume" }
   }]
 }

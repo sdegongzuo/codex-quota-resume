@@ -31,3 +31,4 @@ native-operations.jsonl
 Thumbs.db
 Desktop.ini
 .DS_Store
+.codex-distribution/

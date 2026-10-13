@@ -20,7 +20,7 @@ export class NativeService {
     if (!Object.hasOwn(config.targets ?? {}, message.threadId)) return denied();
     const snapshot = this.events.snapshot(message.threadId);
     if (message.command === 'snapshot') {
-      reply({ id: message.id, result: snapshot }); return;
+      reply({ id: message.id, result: { ...(snapshot ?? {}), protocolVersion: 2 } }); return;
     }
     if (!snapshot || typeof message.turnId !== 'string' || snapshot.turnId !== message.turnId) return denied();
     if (message.command === 'compact') {

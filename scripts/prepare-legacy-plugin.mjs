@@ -6,7 +6,7 @@ import {
 import { dirname, extname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const usage = 'node scripts/prepare-legacy-plugin.mjs --prepare-only [--target <new absolute D: directory>]';
+const usage = 'node scripts/prepare-legacy-plugin.mjs --prepare-only [--target <new absolute D: directory>] [--marketplace-name <name>]';
 let prepareOnly = false;
 const options = new Map();
 for (let index = 2; index < process.argv.length; index += 1) {
@@ -16,7 +16,7 @@ for (let index = 2; index < process.argv.length; index += 1) {
     prepareOnly = true;
     continue;
   }
-  if (key !== '--target' || index + 1 >= process.argv.length || process.argv[index + 1].startsWith('--')) {
+  if (!['--target', '--marketplace-name'].includes(key) || index + 1 >= process.argv.length || process.argv[index + 1].startsWith('--')) {
     throw Error(`Invalid arguments. Usage: ${usage}`);
   }
   if (options.has(key)) throw Error(`Duplicate argument: ${key}`);
@@ -72,7 +72,7 @@ mkdirSync(target);
 mkdirSync(join(target, '.agents', 'plugins'), { recursive: true });
 mkdirSync(pluginRoot);
 
-for (const relativePath of ['.codex-plugin/plugin.json', 'hooks/hooks.json', 'scripts/run.cmd',
+for (const relativePath of ['package.json', '.codex-plugin/plugin.json', 'hooks/hooks.json', 'scripts/run.cmd',
   'skills/quota-resume/SKILL.md', 'README.md']) {
   copyNew(join(sourceRoot, relativePath), join(pluginRoot, relativePath), `codex-quota-resume/${relativePath}`);
 }
@@ -108,10 +108,11 @@ for (const entry of readdirSync(docsSource, { withFileTypes: true })) {
 }
 
 if (existsSync(join(pluginRoot, 'plugin.json'))) throw Error('Legacy-only package unexpectedly contains a root plugin.json.');
-const marketplaceName = 'local-quota-resume-legacy-probe';
+const marketplaceName = options.get('--marketplace-name') ?? 'local-quota-resume-legacy-probe';
+if (!/^[a-z][a-z0-9-]{0,63}$/.test(marketplaceName)) throw Error('Invalid marketplace name');
 const marketplace = {
   name: marketplaceName,
-  interface: { displayName: '额度恢复插件 Legacy 只读验收' },
+  interface: { displayName: marketplaceName === 'local-quota-resume' ? '本地额度恢复插件' : '额度恢复插件 Legacy 只读验收' },
   plugins: [{ name: legacyManifest.name, source: { source: 'local', path: './codex-quota-resume' } }],
 };
 const marketplacePath = join(target, '.agents', 'plugins', 'marketplace.json');

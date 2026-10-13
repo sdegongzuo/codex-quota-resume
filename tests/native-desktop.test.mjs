@@ -5,7 +5,7 @@ import { Desktop } from '../scripts/desktop.mjs';
 test('native compaction adapter binds exact thread and turn and converts usage time units', async () => {
   const calls = [];
   const desktop = new Desktop({ pipe: 'synthetic-unused', callerThread: 'controller', native: {
-    verified: true, snapshot: async id => ({ turnId: id + '-turn', safeBoundary: true }),
+    verified: true, compactionVerified: true, snapshot: async id => ({ turnId: id + '-turn', safeBoundary: true }),
     perform: async operation => { calls.push(operation); return { status: 'completed',
       after: { activeTokens: 20, windowTokens: 100, observedAt: 2000 } }; },
   } });
@@ -21,5 +21,10 @@ test('native compaction adapter binds exact thread and turn and converts usage t
 test('unverified native bridge does not expose an executable compaction adapter', async () => {
   const desktop = new Desktop({ pipe: 'synthetic-unused', callerThread: 'controller', native: { verified: false } });
   assert.equal(await desktop.nativeSnapshot('target'), null);
+  assert.equal(desktop.compactionAdapterForTarget('target', 'turn'), null);
+});
+
+test('authenticated old host cannot expose the newer compaction adapter', () => {
+  const desktop = new Desktop({ pipe: 'synthetic-unused', callerThread: 'controller', native: { verified: true } });
   assert.equal(desktop.compactionAdapterForTarget('target', 'turn'), null);
 });

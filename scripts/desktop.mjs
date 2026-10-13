@@ -23,7 +23,7 @@ export class Desktop {
   }
 
   compactionAdapterForTarget(threadId, turnId) {
-    if (this.native?.verified !== true || !threadId || !turnId) return null;
+    if (this.native?.verified !== true || this.native.compactionVerified !== true || !threadId || !turnId) return null;
     return { verified: true, compact: async ({ requestId }) => {
       const result = await this.native.perform({ action: 'compact', threadId, turnId,
         requestId: `compact:${threadId}:${turnId}:${requestId}` });

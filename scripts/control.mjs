@@ -197,13 +197,16 @@ if (command === 'enable') {
 } else if (command === 'panel') {
   const initialNative = await nativeBridge(configuration(configPath));
   const nativeVerified = initialNative?.verified === true;
+  const compactionVerified = initialNative?.compactionVerified === true;
   const capabilities = { usage: 'verified', threadSnapshot: 'verified',
     activeContextUsage: 'available', contextUsageSource: 'rollout_jsonl_read_only',
     nativeBridge: nativeVerified ? 'authenticated' : 'unavailable',
-    compaction: nativeVerified ? 'connected_unverified' : 'unsupported',
+    compaction: compactionVerified ? 'connected_unverified' : 'unsupported',
     liveTurnEvents: nativeVerified ? 'metadata_connected_unverified' : 'unsupported',
     limitation: nativeVerified
-      ? '原生桥接已通过认证快照，并可读取后端轮次元数据；完整 turn 事件流和正文未订阅，真实压缩及中止效果尚未验收。'
+      ? (compactionVerified
+        ? '原生桥接及压缩关联协议已接入，真实压缩和中止效果等待自然额度周期验收。'
+        : '原生桥接可读取轮次元数据；当前 host 未加载新版压缩关联协议，自动压缩暂不可用。额度恢复续跑独立运行。')
       : '已监测会话可读取单次上下文用量；当前没有通过认证的原生桥接，压缩与中止不可用，后端轮次元数据尚未接入。' };
   const panel = startPanel({ configPath, statePath, capabilities, onGlobalEnabled: async () => launchWatcher(),
       onStop: nativeVerified ? async operation => {
