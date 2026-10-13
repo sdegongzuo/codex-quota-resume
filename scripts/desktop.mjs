@@ -1,15 +1,35 @@
 import net from 'node:net';
 import { randomUUID } from 'node:crypto';
+import { homedir } from 'node:os';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { observeRolloutUsage } from './rollout-usage.mjs';
 
 // 使用本机 Codex 插件提供的命名管道；不读取凭据、不启动第二个聊天执行器。
 export class Desktop {
   constructor({ pipe = process.env.CODEX_APP_TOOLS_PIPE_PATH,
-    callerThread = process.env.CODEX_THREAD_ID, hostId = process.env.CODEX_APP_TOOLS_CALLER_HOST_ID } = {}) {
+    callerThread = process.env.CODEX_THREAD_ID, hostId = process.env.CODEX_APP_TOOLS_CALLER_HOST_ID, native } = {}) {
     if (!pipe || !callerThread) throw new Error('需要在 Codex 聊天中启动，以取得桌面管道和当前聊天 ID');
     this.pipe = pipe;
     this.callerThread = callerThread;
     this.hostId = hostId;
     this.nextId = 0;
+    this.native = native;
+  }
+
+  async nativeSnapshot(threadId) {
+    if (this.native?.verified !== true) return null;
+    return this.native.snapshot(threadId);
+  }
+
+  compactionAdapterForTarget(threadId, turnId) {
+    if (this.native?.verified !== true || !threadId || !turnId) return null;
+    return { verified: true, compact: async ({ requestId }) => {
+      const result = await this.native.perform({ action: 'compact', threadId, turnId,
+        requestId: `compact:${threadId}:${turnId}:${requestId}` });
+      return { completed: result.status === 'completed', after: result.after
+        ? { ...result.after, observedAt: result.after.observedAt / 1000 } : null };
+    } };
   }
 
   request(method, params) {
@@ -65,11 +85,37 @@ export class Desktop {
     if (name === 'send_message_to_thread') return { accepted: true };
     throw new Error(`桌面工具未返回结构化数据: ${name}`);
   }
+
+  async capabilities() {
+    if (!this.tools) this.tools = (await this.request('tools/list', { threadStartKind: 'all' })).tools;
+    const names = this.tools.map(tool => tool.name);
+    return {
+      usage: names.includes('get_usage_limits') ? 'available' : 'unavailable',
+      threadSnapshot: names.includes('read_thread') ? 'available' : 'unavailable',
+      activeContextUsage: 'available',
+      contextUsageSource: 'rollout_jsonl_read_only',
+      compaction: 'unsupported',
+      liveTurnEvents: 'unsupported',
+      discoveredTools: names,
+      limitation: '活动用量只读自白名单会话 rollout 的单次 usage 与 model_context_window；压缩及实时 turn 事件仍不支持。',
+    };
+  }
+
+  async contextUsage(targets, options = {}) {
+    const codexHome = process.env.CODEX_HOME ?? join(homedir(), '.codex');
+    const sessionsRoot = options.sessionsRoot ?? join(codexHome, 'sessions');
+    if (!existsSync(sessionsRoot)) return Object.fromEntries(Object.keys(targets ?? {}).map(id => [id,
+      { status: 'unavailable', reason: 'sessions directory unavailable' }]));
+    return observeRolloutUsage({ sessionsRoot, targets, nowMs: options.nowMs,
+      staleAfterSeconds: options.staleAfterSeconds });
+  }
 }
 
 if (process.argv.includes('--probe')) {
   const desktop = new Desktop();
+  const capabilities = await desktop.capabilities();
   const usage = await desktop.call('get_usage_limits');
+  console.log('capabilities:', JSON.stringify(capabilities));
   console.log('usage:', JSON.stringify({ ordinaryUsageAllowed: usage.ordinaryUsageAllowed,
     primary: usage.rateLimits?.primary, secondary: usage.rateLimits?.secondary }));
   const thread = await desktop.call('read_thread', { threadId: desktop.callerThread, turnLimit: 1, includeOutputs: false });

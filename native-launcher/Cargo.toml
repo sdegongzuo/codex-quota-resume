@@ -1,0 +1,22 @@
+[package]
+name = "quota-resume-native-launcher"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "quota-resume-launcher"
+path = "src/main.rs"
+
+[[bin]]
+name = "pipe-acceptance"
+path = "src/bin/pipe_acceptance.rs"
+
+[[bin]]
+name = "pipe-broker"
+path = "src/bin/pipe_broker.rs"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

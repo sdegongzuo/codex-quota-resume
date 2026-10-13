@@ -1,0 +1,4 @@
+{"type":"session_meta","payload":{"id":"55555555-5555-4555-8555-555555555555"}}
+{"timestamp":"2026-10-13T01:00:00.000Z","type":"turn_context","payload":{"turn_id":"old-turn","model":"test-model"}}
+{"timestamp":"2026-10-13T01:00:01.000Z","type":"event_msg","payload":{"info":{"model_context_window":200}}}
+{"timestamp":"2026-10-13T01:00:02.000Z","type":"token_usage_record","payload":{"thread_id":"55555555-5555-4555-8555-555555555555","turn_id":"old-turn","usage":{"total_tokens":90}}}

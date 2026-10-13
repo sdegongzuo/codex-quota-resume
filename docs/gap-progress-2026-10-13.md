@@ -1,0 +1,74 @@
+# 缺口补齐进度与证据
+
+本页补充 2026-10-12 的验收记录，不把后来完成的工作计入早期验收。
+
+## 已执行
+
+- 安装缓存与当时源代码逐文件核对和同步，共 17 个文件；旧内容留存于 D 盘隔离备份。此后新增 observer 与路由器尚未再次同步，不能据此宣称安装态包含它们。
+- 通过真实 Chrome 页面点击验收总开关、单项关闭、阈值保存、刷新后持久保留、人工核对请求，共 5 项通过；检查了截图。使用隔离数据，没有向真实会话发送或中断。
+- 上下文 observer 初版与 engine、desktop、store、compaction 的相关测试共 36 项通过。但独立审查发现 timestamp-first 压缩标记、新轮次旧样本和缓存状态缺陷，因此仍在修复，暂不安装该初版。
+- 新增原生协议路由核心 `scripts/native-router.mjs`。独立测试 4 项通过：相同请求 ID 的响应隔离、审批与通知原路转发、非法方法/目标拒绝、断连只报告一次未知结果。与现有压缩协调器一起运行 7 项测试通过。
+- `git diff --check` 通过。源代码仍有未提交变更，这些结果不代表 GitHub 已包含新实现。
+
+后续 Luna 修复了字段顺序、新轮次样本清理、缓存状态和多文件选择，主代理独立重跑完整仓库测试 42/42 通过。主代理继续审查发现：缺少 turnId 的 malformed usage 可能触发空 turn 异常，候选路径全部不可用时可能访问空选择。已交回修复，因此完整测试通过仍不足以批准安装 observer。
+
+上述异常路径随后修复，主代理独立重跑全仓测试 45/45 通过（包含新增 stdio host 两项）。对当前原会话只读采样得到新鲜用量回执，未输出会话正文或身份字段。随后同步安装缓存 18 个明确文件，逐文件哈希一致；旧文件备份留在 D 盘。安全停止旧插件 watcher 并从安装缓存启动后，运行态确认当前目标样本可用、旧目标样本过期、开关保留、待续跑记录为零。该结果证明 observer 已进入实际运行链路，不证明真实压缩接口已接通。
+
+原生 launcher 已有 Rust 源码和隔离 release 构建；Node stdio host 的模拟后端测试验证单后端、JSON 双向转发和退出码。桌面实际在 app-server 前传递全局 `-c` 参数，初版 launcher 未处理该顺序，已要求修复。包装器仍未设置为桌面 CLI，也没有执行真实会话操作。
+
+新增 `scripts/native-events.mjs`，按当前 bundled CLI 生成 schema 的原生事件字段跟踪授权会话。同一 turn 的 terminal 状态才能确认停止；contextCompaction 完成后清除旧用量，等待新的单次 usage。模块不保留 item 正文，未知目标和其他 turn 的事件被忽略，已接入 stdio host；默认授权为空，尚未开放 IPC。主代理独立运行全仓测试 47/47 通过。
+
+launcher 参数与退出码修复后，主代理独立运行 Rust 测试 5/5 通过，并核对隔离只读回执：按桌面实际 argv 经过 launcher、Node host、原 CLI 后，initialize 和 mcpServerStatus/list 都成功，退出码 0、无超时。状态返回 4 个 server，其 tools 字段是对象，按 key 统计 174 项（初次实现者按数组计数为零的结论已纠正）。测试没有创建聊天，也未更改桌面启动配置。
+
+新增 `scripts/native-operations.mjs` 协调真实 RPC 的持久化占位和结果复核。请求接受而缺少完成及后续用量时进入 uncertain，恢复 sending 记录不自动重发；额度未许可或落盘失败不发送，旧 turn 不触发当前任务停止。它仍使用注入的桥接传输，未接生产 worker。实际压缩是否产生新 turn、完成事件与用量的关联顺序尚需真实接口验收，不能以当前模拟顺序当成证明。
+
+新增 `scripts/native-service.mjs` 限制桥接命令为 snapshot、compact、interrupt，校验随机令牌与当前配置目标及准确 turn。压缩需要开关、额度和安全边界，异步额度检查后再次复核授权；手动 interrupt 不受自动续跑关闭影响。新增 `scripts/native-wire.mjs` 实现长度前缀 UTF8 JSON 帧、1MiB 上限、分片及合并处理，残缺或非法帧拒绝。主代理独立运行全仓测试 57/57 通过；这些模块尚未向生产开放 socket，Windows ACL 管道在开发中。
+
+Desktop 支持显式注入已验证 native bridge，并生成绑定准确 thread/turn 的压缩 adapter；engine 仅在当前样本与原生 snapshot 的 turn 一致且安全边界成立时允许它。新增 adapter 回归两项通过。生产控制入口尚未传入 bridge，未验证桥接仍返回空 adapter。
+
+任务列表新增 `/api/stop`，只在配置真实 onStop 时可用，默认返回 501；runningTurnId 不匹配返回 409。有效请求先持久关闭该 item 和 target 的自动续跑，再调用准确原会话/轮次停止。独立 HTTP 验收证明旧轮次不能调用、关闭选择先于操作保存、uncertain 不被显示为完成。页面按钮及实际 native onStop 尚待接通，不能将此接口验收解释为真实停止已可用。
+
+主代理独立执行 Windows `pipe-acceptance`：实际创建受限 DACL 的管道，子进程连接后由操作系统取得 PID 并与预期匹配，UTF8 双向帧成功。实际读取 DACL 为 logon SID only，句柄不可继承；创建模式核对含 reject remote clients 与 first instance。此验收只证明本机正常路径及权限配置，不代表已实测远程客户端或另一个登录会话的拒绝效果。
+
+新增 Node `native-channel` 只连接预建 Windows 管道，不以 Node 默认 DACL 创建 server；`native-client` 每连接发送一个带令牌命令，核对响应 ID，20 秒超时不会自动重试。独立模拟传输验证分片响应。全仓 Node 测试 61/61 通过、Rust launcher 测试 5/5 通过。Rust broker 仍需接好 host/worker 两条管道及生命周期，生产没有启用包装器。
+
+随后 host 主入口接入 native channel/service，启动前校验 D 盘配置路径和令牌。host 仅开放内部 `account/rateLimits/read` 只读请求用于压缩前检查，未知窗口或任一窗口耗尽时拒绝压缩；worker 仍额外要求桌面 `ordinaryUsageAllowed` 为真。control 可从受信任 hook 环境登记桥接 descriptor，worker 认证连接后恢复原生操作记录，再注入 Desktop adapter。生产安装尚未包含这些新入口。
+
+独立审查修复了原生操作并发请求在 await snapshot 前抢跑的问题：同一 requestId/目标/动作共享单一 Promise；不同身份复用 ID 拒绝。新增并发回归并重跑 Node 全仓测试 64/64 通过。broker 首次隔离运行挂起，实现者正在定位连接及退出流程；该运行未计作验收通过。
+
+页面增加正在自动续跑任务的停止按钮，仅在启动面板时已认证 native bridge 可用才显示。control 将 onStop 接入同一原生操作协调器，未有桥接时保持 501。设置命令输出改为只包含阈值/调度设置，防止新登记的 bridge token 出现在标准输出。
+
+新增 worker→framed client→service→router→原生事件状态的隔离端到端测试：身份认证成功，真实模块调用 compact，收到模拟完成与新 usage 后才确认 completed，同 requestId 第二次不再发 RPC。该测试通过，但后端事件是合成数据，不证明真实 CLI 压缩效果。
+
+broker 实现者报告两个串行隔离 worker 请求已往返；主代理审查发现其 timeout 会杀 Node host，可能影响 renderer 后端任务，已要求改为只禁用 IPC 且保留 stdio/backend。此策略修复和生命周期回归未完成前不批准接入桌面启动器。
+
+该超时策略随后修复。主代理独立运行真实 Rust broker + Node host/service/client/worker + 合成 backend：首次运行发现 worker 管道重建间隙导致下一请求连接失败，已修 NativeClient，仅在尚未 connect 且未发送任何帧时重试连接；发送后断连不重试。回归后完整隔离链路 5 项通过（认证、压缩/新usage、准确轮次停止、持久占位、自然退出）。
+
+主代理独立执行 20 秒半帧超时用例，在收到管道实际关闭事件后再次通过 stdio echo，host 和 broker 自然退出 0。首次测试在 deadline 消息后立即退出，未观察到 pipe close，已修正观察顺序后重跑通过；没有把该第一次弱证据当作通过。主代理独立 Rust 测试 14/14、Node 全仓测试 66/66 通过。
+
+实际 Chrome 页面重新点击验收 6 项通过，包含新停止按钮、准确合成轮次及先保存关闭选择；截图已独立检查。页面已按 bridge 能力调整提示文案。所有运行使用 D 盘隔离数据与合成后端，真实桌面仍未启用包装器；真实压缩通知顺序/turn关联、原会话信息延续、列表真实停止及自然额度恢复仍待验收。
+
+安装准备方案仅在 D 盘新的明确目录生成代码、启动配置和令牌；准备时不写原 config/state，启动时引用明确传入的原配置及数据目录，保留已有开关、队列和历史。当前实际桌面主程序为安装包中的 ChatGPT.exe，不能按名字猜测以同包 Codex.exe 替代；正式启动路径须来自当前进程证据。脚本在开发与独立审查中，尚未启动桌面。
+
+事件处理进一步前置过滤 notification method，正文流增量不会执行授权配置读取，也不会进入状态缓存。独立事件回归 3/3 通过。
+
+安装准备独立复核发现并修复了 JS 模板中的反斜杠把 PS 路径变成换行/退格的问题；随后使用生成脚本真实启动隔离 mock exe，而非只做语法检查。最终准备结果 36 个清单文件哈希匹配（另有 manifest 文件），hooks/skills/README/docs 完整，参数原样保留，原配置哈希不变，实际 token ACL 为 protected、1 条当前用户 ACE、无其他 ACE；同路径已运行 mock 程序被拒绝；TEMP/TMP/TMPDIR 均为 D 盘包内目录。真实 Codex 未启动。
+
+源代码按依赖顺序同步到既有 0.2.0 安装缓存，共 31 个文件哈希核对一致，旧内容留存 D 盘备份；插件 watcher 已安全停止再从安装缓存启动，确认 enabled/running/connection 正常，pending 为零。这只证明新代码已安装且原工具通道仍连通，不证明桌面加载了原生包装器。主代理独立 Node 全仓测试 67/67 通过。协调正常退出并由准备脚本启动桌面，是下一项外部步骤；未杀桌面进程、未改系统环境或 hook 信任。
+
+## 当前运行态
+
+任务列表服务可访问，后台 watcher 正在运行，总开关开启，当前无待续跑记录。其已加载代码早于新增 observer；状态仍正确显示实际压缩不支持。
+
+单项开关和总开关用于取消后续自动续跑。当前正在运行的轮次仍需用户在原会话按桌面停止按钮。不能把取消排队解释为已经中断运行。
+
+## 尚需完成
+
+1. observer 已完成本轮修复、回归与安装运行态核对；仍需在真实压缩前后核对样本更新和过期处理。
+2. Windows 原生 exe 包装器、当前用户 ACL 的 IPC、明确线程授权及事件过滤。
+3. worker 接入真实压缩与列表停止，取得原后端完成事件和操作后状态。
+4. 桌面正常启动接入与原会话真实效果验收。设计见 [原生桥接方案](native-bridge-plan.md)。
+5. 自动登记 hook 的信任及实际加载验收，不能以手动 enable 代替。
+6. 自然五小时额度耗尽和恢复完整观察 3～5 次，验证提前压缩、原会话续跑、串行、防重复及关闭选择。
+
+这些缺口未通过之前，整体目标仍未完成。

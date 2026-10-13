@@ -2,10 +2,12 @@
 node_modules/
 coverage/
 dist/
+native-launcher/target/
 *.log
 
 # Local test receipts may contain desktop or account metadata
 .test-evidence/
+.acceptance-data/
 
 # Local runtime data; never commit chat IDs, pipes, or account state
 data/
@@ -14,6 +16,7 @@ runtime.json
 config.jsonl
 state.jsonl
 events.jsonl
+native-operations.jsonl
 
 # Local environment and credentials
 .env

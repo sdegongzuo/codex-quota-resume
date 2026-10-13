@@ -7,7 +7,9 @@ import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { Desktop } from './desktop.mjs';
 import { tick } from './engine.mjs';
-import { configuration, records, append } from './store.mjs';
+import { configuration, records, append, migrateState, shouldLaunchWatcher } from './store.mjs';
+import { startPanel } from './panel.mjs';
+import { connectNativeWorker } from './native-worker.mjs';
 
 const option = name => {
   const index = process.argv.indexOf(name);
@@ -31,18 +33,43 @@ const log = (event, details = {}) => appendFileSync(resolve(dataDir, 'events.jso
   JSON.stringify({ time: new Date().toISOString(), event, ...details }) + '\n');
 const now = () => Math.floor(Date.now() / 1000);
 const command = process.argv[2];
+const nativeOperationsPath = resolve(dataDir, 'native-operations.jsonl');
+let nativeConnection = null;
+let nativeDescriptor = null;
+async function nativeBridge(config) {
+  if (!config.nativeBridge) return null;
+  const identity = JSON.stringify(config.nativeBridge);
+  if (nativeDescriptor === identity && nativeConnection) return nativeConnection;
+  const desktop = new Desktop(config);
+  try {
+    nativeConnection = await connectNativeWorker({ descriptor: config.nativeBridge, targets: config.targets,
+      history: records(nativeOperationsPath), persist: record => append(nativeOperationsPath, record),
+      ordinaryUsageAllowed: async () => (await desktop.call('get_usage_limits')).ordinaryUsageAllowed === true });
+    nativeDescriptor = identity;
+    return nativeConnection;
+  } catch { nativeConnection = null; return null; }
+}
 
-function enable(threadId, fromHook = false, refreshOnly = false) {
-  const old = configuration(configPath);
-  if (fromHook && !old.enabled) return;
-  const desktop = new Desktop({ callerThread: threadId });
-  append(configPath, { type: 'enable', threadId, pipe: desktop.pipe,
-    hostId: desktop.hostId ?? 'local', armedAt: refreshOnly && old.targets[threadId]
-      ? old.targets[threadId].armedAt : now() });
+function launchWatcher() {
   const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'watch', '--data-dir', dataDir],
     { detached: true, windowsHide: true, stdio: 'ignore' });
   child.on('error', error => log('launch_error', { code: error.code ?? 'unknown' }));
   child.unref();
+}
+
+function enable(threadId, fromHook = false, refreshOnly = false) {
+  const old = configuration(configPath);
+  const desktop = new Desktop({ callerThread: threadId });
+  if (fromHook) append(configPath, { type: 'register', threadId, pipe: desktop.pipe,
+    hostId: desktop.hostId ?? 'local', armedAt: old.targets[threadId]?.armedAt ?? now() });
+  else append(configPath, { type: 'enable', threadId, pipe: desktop.pipe,
+    hostId: desktop.hostId ?? 'local', armedAt: refreshOnly && old.targets[threadId]
+      ? old.targets[threadId].armedAt : now() });
+  if (process.env.QUOTA_RESUME_WORKER_PIPE && process.env.QUOTA_RESUME_BRIDGE_TOKEN) {
+    append(configPath, { type: 'nativeBridge', value: { pipe: process.env.QUOTA_RESUME_WORKER_PIPE,
+      token: process.env.QUOTA_RESUME_BRIDGE_TOKEN } });
+  }
+  if (shouldLaunchWatcher(fromHook, old.enabled)) launchWatcher();
   log('enabled', { threadId });
   if (!fromHook) console.log(JSON.stringify({ enabled: true, threadId, dataDir }));
 }
@@ -50,7 +77,16 @@ function enable(threadId, fromHook = false, refreshOnly = false) {
 async function watch() {
   // 用本机端口互斥，无需删除锁文件；同一数据目录只允许一个后台程序。
   const port = 44000 + createHash('sha256').update(dataDir.toLowerCase()).digest().readUInt16LE() % 10000;
-  const lock = net.createServer(socket => socket.end('codex-quota-resume\n'));
+  let stopRequested = false;
+  const lock = net.createServer(socket => {
+    socket.setTimeout(300, () => socket.end('codex-quota-resume\n'));
+    socket.on('data', data => {
+      if (data.toString().trim() === 'codex-quota-resume:stop') {
+        stopRequested = true;
+        socket.end('codex-quota-resume:stopping\n');
+      } else socket.end('codex-quota-resume\n');
+    });
+  });
   try {
     await new Promise((resolvePromise, reject) => {
       lock.once('error', reject);
@@ -61,24 +97,37 @@ async function watch() {
     throw error;
   }
   save(runtimePath, { pid: process.pid, port, startedAt: now(), alive: true });
-  const state = records(statePath).at(-1) ?? { pending: {}, handled: [] };
+  const migrated = migrateState(records(statePath).at(-1) ?? { pending: {}, handled: [] }, configuration(configPath));
+  const state = migrated.state;
+  if (migrated.changed) append(statePath, state);
   log('worker_started', { pid: process.pid });
   try {
-    while (true) {
+    while (!stopRequested) {
       const config = configuration(configPath);
       if (!config.enabled) break;
-      // 已处理的失败保留在 handled；后续新的失败可以独立进入等待。
-      for (const [id, pending] of Object.entries(state.pending)) {
-        if (['sent', 'cancelled'].includes(pending.phase)) delete state.pending[id];
-      }
       try {
-        await tick({ desktop: new Desktop(config), config, state, now: now(),
+          await tick({ desktop: new Desktop({ ...config, native: await nativeBridge(config) }), config, state, now: now(),
           persist: () => append(statePath, state), log,
-          stillEnabled: (threadId, armedAt) => {
+          stillEnabled: (threadId, armedAt, itemId) => {
             const current = configuration(configPath);
-            return current.enabled && current.targets[threadId]?.armedAt === armedAt;
-          } });
+            return current.enabled && current.targets[threadId]?.enabled !== false
+              && current.targets[threadId]?.armedAt === armedAt
+              && current.items?.[itemId]?.enabled !== false;
+          },
+          acknowledgeManualResolution: (itemId, requestedAt) => append(configPath, {
+            type: 'item', id: itemId, value: {
+              manualResolutionRequestedAt: null, manualResolutionHandledAt: requestedAt,
+            },
+          }) });
+        if (state.connection?.status !== 'available') {
+          state.connection = { status: 'available', observedAt: now(), reason: null };
+          append(statePath, state);
+        }
       } catch (error) {
+        state.connection = { status: 'unavailable', observedAt: now(), reason: '桌面连接或状态读取失败' };
+        try { append(statePath, state); } catch (persistError) {
+          log('connection_state_persist_error', { code: persistError.code ?? 'WRITE_ERROR' });
+        }
         log('poll_error', { code: error.code ?? 'RPC_ERROR', reason: '桌面连接或数据读取失败' });
       }
       await new Promise(resolvePromise => setTimeout(resolvePromise, config.intervalSeconds * 1000));
@@ -96,6 +145,70 @@ if (command === 'enable') {
   append(configPath, { type: 'disable' });
   log('disabled');
   console.log('已关闭自动继续；后台程序会在下一轮检查时自行退出。');
+} else if (command === 'stop') {
+  const runtime = load(runtimePath, null);
+  if (!runtime?.alive || !Number.isInteger(runtime.port)) {
+  console.log('后台程序当前未运行。');
+  } else {
+    await new Promise((resolvePromise, reject) => {
+      const socket = net.createConnection({ host: '127.0.0.1', port: runtime.port });
+      const timer = setTimeout(() => { socket.destroy(); reject(new Error('停止请求超时')); }, 2000);
+      socket.once('connect', () => socket.write('codex-quota-resume:stop'));
+      socket.on('data', data => {
+        clearTimeout(timer);
+        const reply = data.toString().trim();
+        socket.destroy();
+        if (reply === 'codex-quota-resume:stopping') { console.log('后台程序已收到安全停止请求。'); resolvePromise(); }
+        else reject(new Error('后台程序未确认停止请求。'));
+      });
+      socket.on('error', error => { clearTimeout(timer); reject(error); });
+    });
+  }
+} else if (command === 'resolve') {
+  const id = option('--item');
+  const state = records(statePath).at(-1) ?? { pending: {} };
+  const item = state.pending?.[id];
+  if (!id || !item || !['sending', 'uncertain'].includes(item.phase)) {
+    throw new Error('用法: resolve --item <sending/uncertain任务ID>');
+  }
+  append(configPath, { type: 'item', id, value: { manualResolutionRequestedAt: now() } });
+  console.log(JSON.stringify({ requested: true, id,
+    note: '请先确认原会话没有运行中的轮次；后台确认安全后仅解除槽位，不会重发。' }));
+} else if (command === 'target') {
+  const threadId = option('--thread');
+  const enabled = process.argv[3] === 'enable';
+  if (!threadId || !['enable', 'disable'].includes(process.argv[3])) throw new Error('用法: target enable|disable --thread <会话ID>');
+  append(configPath, { type: 'target', threadId, value: { enabled } });
+  if (enabled) launchWatcher();
+  console.log(JSON.stringify({ threadId, enabled }));
+} else if (command === 'settings') {
+  const ratio = Number(option('--threshold'));
+  const settings = {};
+  if (option('--threshold') !== undefined) {
+    if (!(ratio >= 0.1 && ratio <= 0.9)) throw new Error('--threshold 必须是 0.1 到 0.9 的比例，如 0.6');
+    settings.compactionThresholdRatio = ratio;
+  }
+  const config = configuration(configPath);
+  append(configPath, { type: 'settings', value: settings });
+    console.log(JSON.stringify({ compactionThresholdRatio: settings.compactionThresholdRatio ?? config.compactionThresholdRatio,
+      resumeBufferSeconds: settings.resumeBufferSeconds ?? config.resumeBufferSeconds,
+      recoveryRetrySeconds: settings.recoveryRetrySeconds ?? config.recoveryRetrySeconds,
+      intervalSeconds: settings.intervalSeconds ?? config.intervalSeconds }, null, 2));
+} else if (command === 'panel') {
+  const capabilities = { usage: 'verified', threadSnapshot: 'verified',
+      activeContextUsage: 'available', contextUsageSource: 'rollout_jsonl_read_only',
+      compaction: 'unsupported', liveTurnEvents: 'unsupported',
+      limitation: '已监测会话可读取单次上下文用量，实际压缩与停止接口尚未接通。' };
+    const initialNative = await nativeBridge(configuration(configPath));
+    const panel = startPanel({ configPath, statePath, capabilities, onGlobalEnabled: async () => launchWatcher(),
+      onStop: initialNative ? async operation => {
+        const native = await nativeBridge(configuration(configPath));
+        if (!native) return { status: 'connection_unavailable' };
+        return native.perform({ ...operation, action: 'interrupt' });
+      } : null });
+  await new Promise(resolvePromise => panel.server.once('listening', resolvePromise));
+  console.log(JSON.stringify({ url: panel.getUrl(), host: '127.0.0.1', port: panel.server.address().port,
+    dataDir, capabilities }, null, 2));
 } else if (command === 'status') {
   const config = configuration(configPath);
   const runtime = load(runtimePath, null);
@@ -112,6 +225,8 @@ if (command === 'enable') {
     });
   }
   console.log(JSON.stringify({ enabled: config.enabled, targets: config.targets,
+    settings: { compactionThresholdRatio: config.compactionThresholdRatio,
+      resumeBufferSeconds: config.resumeBufferSeconds, recoveryRetrySeconds: config.recoveryRetrySeconds },
     running, runtime, state: records(statePath).at(-1) ?? null, dataDir }, null, 2));
 } else if (command === 'watch') {
   await watch();
@@ -131,6 +246,6 @@ if (command === 'enable') {
   }
   console.log('{}');
 } else {
-  console.error('用法: node scripts/control.mjs enable|disable|status|probe|watch|hook [--data-dir 目录]');
+  console.error('用法: node scripts/control.mjs enable|disable|target|settings|panel|status|probe|resolve|watch|hook [--data-dir 目录]');
   process.exitCode = 1;
 }
