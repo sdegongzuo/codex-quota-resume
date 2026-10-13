@@ -37,19 +37,35 @@ export class NativeOperations {
     // Durability is required before any backend request. Persistence failures cannot send.
     await this.persist({ ...claim });
     try {
-      await this.request(action === 'compact' ? 'thread/compact/start' : 'turn/interrupt',
+      const accepted = await this.request(action === 'compact' ? 'thread/compact/start' : 'turn/interrupt',
         action === 'compact' ? { threadId } : { threadId, turnId }, { turnId });
+      if (action === 'compact' && (typeof accepted?.operationId === 'string' || typeof accepted?.operationId === 'number')) {
+        claim.operationId = accepted.operationId;
+        await this.persist({ ...claim });
+      }
+      if (action === 'compact' && !Object.hasOwn(claim, 'operationId')) throw Error('Compaction correlation receipt missing');
       const deadline = this.now() + this.timeoutMs;
       while (this.now() <= deadline) {
         const after = await this.snapshot(threadId);
-        if (!after || after.turnId !== turnId) break;
+        if (!after) break;
+        const receipt = after.compactionReceipt;
+        const correlated = action === 'compact' && Object.hasOwn(claim, 'operationId')
+          && receipt?.operationId === claim.operationId && receipt.baselineTurnId === turnId
+          && receipt.turnId === after.turnId && receipt.status === 'completed';
+        if (action === 'compact') {
+          if (receipt?.operationId !== claim.operationId || receipt.status === 'uncertain') break;
+          if (correlated && after.status === 'completed' && after.usage
+            && after.usageSequence > receipt.startedSequence && after.usage.observedAt >= claim.claimedAt) {
+            Object.assign(claim, { status: 'completed', compactTurnId: after.turnId,
+              after: { ...after.usage }, observedAt: this.now() }); break;
+          }
+          if (receipt.turnId && receipt.turnId !== after.turnId) break;
+          await this.wait(250);
+          continue;
+        }
+        if (after.turnId !== turnId) break;
         if (action === 'interrupt' && after.status === 'interrupted') {
           Object.assign(claim, { status: 'completed', observedAt: this.now() }); break;
-        }
-        if (action === 'compact' && after.compactionCompletedAt > (before.compactionCompletedAt ?? 0)
-          && after.usage && after.usage.observedAt >= after.compactionCompletedAt
-          && after.usage.observedAt >= claim.claimedAt) {
-          Object.assign(claim, { status: 'completed', after: { ...after.usage }, observedAt: this.now() }); break;
         }
         await this.wait(250);
       }

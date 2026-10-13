@@ -29,13 +29,13 @@ test('durability failure and quota denial prevent native requests', async () => 
   assert.equal(q.sent(), 0);
 });
 
-test('native compaction needs completion plus new usage and restore prevents crash resend', async () => {
+test('missing operation receipt cannot confirm compaction and restore prevents crash resend', async () => {
   let calls = 0;
   const before = { turnId: 't1', status: 'completed', safeBoundary: true, compactionCompletedAt: 1 };
   const after = { ...before, compactionCompletedAt: 1001, usage: { activeTokens: 20, windowTokens: 100, observedAt: 1002 } };
   const operations = new NativeOperations({ request: async () => {}, snapshot: async () => ++calls === 1 ? before : after,
     persist: async () => {}, ordinaryUsageAllowed: async () => true, now: () => 1000 });
-  assert.equal((await operations.perform(invocation)).status, 'completed');
+  assert.equal((await operations.perform(invocation)).status, 'uncertain');
   const s = setup();
   s.operations.restore([{ ...invocation, status: 'sending' }]);
   assert.equal((await s.operations.perform(invocation)).status, 'uncertain');
@@ -69,4 +69,26 @@ test('simultaneous requests with the same identity cannot race before the durabl
   assert.equal(first.status, 'uncertain');
   assert.equal(second.status, 'uncertain');
   assert.equal(s.sent(), 1);
+});
+
+test('new compact turn requires its operation receipt, completed status and fresh usage', async () => {
+  const check = async override => {
+    let time = 1000, sent = false;
+    const before = { turnId: 't1', status: 'completed', safeBoundary: true };
+    const after = { turnId: 'compact1', status: 'completed', usageSequence: 4,
+      usage: { activeTokens: 20, windowTokens: 100, observedAt: 1001 },
+      compactionReceipt: { operationId: 'op1', baselineTurnId: 't1', turnId: 'compact1',
+        status: 'completed', startedSequence: 3 }, ...override };
+    const operations = new NativeOperations({ snapshot: async () => sent ? after : before,
+      request: async () => { sent = true; return { operationId: 'op1' }; },
+      ordinaryUsageAllowed: async () => true, persist: async () => {}, now: () => time,
+      wait: async ms => { time += ms; }, timeoutMs: 500 });
+    return operations.perform(invocation);
+  };
+  assert.equal((await check({})).status, 'completed');
+  assert.equal((await check({ status: 'inProgress' })).status, 'uncertain');
+  assert.equal((await check({ status: 'failed' })).status, 'uncertain');
+  assert.equal((await check({ usageSequence: 2 })).status, 'uncertain');
+  assert.equal((await check({ compactionReceipt: { operationId: 'other' } })).status, 'uncertain');
+  assert.equal((await check({ turnId: 'new-user-turn' })).status, 'uncertain');
 });

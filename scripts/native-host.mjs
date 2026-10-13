@@ -33,6 +33,7 @@ export function startNativeHost({ executable, args, input = process.stdin, outpu
     try {
       const message = JSON.parse(line);
       if (!message || typeof message !== 'object' || Array.isArray(message)) throw Error('Invalid envelope');
+      events.observeRendererMessage(message);
       router.rendererMessage(message);
     } catch { abort('invalid renderer envelope'); }
   });

@@ -6,7 +6,8 @@ const setup = () => {
   let config = { enabled: true, targets: { allowed: { enabled: true } } };
   let snapshot = { turnId: 't1', status: 'completed', safeBoundary: true };
   const sent = [], replies = [];
-  const service = new NativeService({ token, configuration: () => config, events: { snapshot: () => snapshot },
+  const service = new NativeService({ token, configuration: () => config, events: { snapshot: () => snapshot,
+    beginCompaction: () => true, invalidateCompaction: () => {} },
     ordinaryUsageAllowed: async () => true,
     router: { bridgeRequest: (m, reply, authorize) => { if (!authorize()) throw Error('denied'); sent.push(m); reply({ id: m.id, result: {} }); } } });
   return { service, sent, replies, reply: r => replies.push(r), setConfig: c => { config = c; }, setSnapshot: s => { snapshot = s; } };

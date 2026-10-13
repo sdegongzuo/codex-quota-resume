@@ -70,6 +70,32 @@ broker 实现者报告两个串行隔离 worker 请求已往返；主代理审�
 
 直接 exe 启动诊断出现 no-package-identity；更新器和框架身份识别兼容性仍待处理。已连通的聊天及工具通道不证明这些系统集成正常。
 
+## 接入后的协议修复
+
+当前实际 CLI 的 --version 为 0.162.0-alpha.17.2。对照该精确 tag 的上游实现发现两处旧模拟未覆盖的条件：[手动压缩任务](https://github.com/openai/codex/blob/rust-v0.162.0-alpha.17.2/codex-rs/core/src/tasks/compact.rs) 会发送自己的 turn/started；[远端压缩](https://github.com/openai/codex/blob/rust-v0.162.0-alpha.17.2/codex-rs/core/src/compact_remote_v2.rs) 在安装替换历史后先 recompute_token_usage，再发送 contextCompaction 的 item/completed。旧协调器要求同一 turn，旧事件缓存又在完成时清除 usage，可能把实际成功永远判成不确定。
+
+新增经过认证的压缩预约及操作 ID，绑定原轮次、压缩新轮次和压缩 item。并发 frontend 输入、普通 item 或响应缺少操作关联时保留 uncertain，禁止重复请求；只有关联正确、压缩 item 完成、压缩轮次 completed 和新 usage 均具备才确认完成。事件仅留元数据，不缓存正文。其新轮次关联仍依赖同一个已包装的 renderer/backend 事件链；其他入口或跨客户端竞争的真实行为仍待验证。
+
+当前真实桌面 read_thread 返回 active/activeFlags。修复等待审批或用户输入的识别，并在用户等待时保留自动续跑槽位，直到明确解除等待且轮次结束。面板允许仍占槽位、具备准确 runningTurnId 的用户等待任务请求停止；已离开槽位的旧等待记录不能据此中止其他轮次。
+
+实现代理对主代理本轮 diff 作独立只读审查，指出缺失 operationId 的旧确认回退及等待类型的槽位释放边界；主代理随后修复并补回归。最终 Node 全仓 74/74、真实 Windows broker 加合成 backend 5 项通过。首次完整链路检查因增加操作 ID 持久记录，旧断言误把两条 sending 日志当成两次发送；改为核对不同 requestId 的持久占位后重跑通过。真实 Chrome 页面在 running 与 needs_user 两种合成场景各通过 6 项点击检查，截图已查看；这些结果不代表真实聊天中止。
+
+安装包身份调查核对了当前 manifest、桌面 ASAR 的本地 CLI override 来源及 Microsoft 包激活接口。没有找到已证实可同时保留包身份并传入独立桥接环境的公开启动路径；未改包调试、注册表或系统环境。仍保持此项未完成，不能把只读调查写成修复。
+
+独立启动原 CLI 的只读 hooks/list 返回 4 项用户来源 hook，未返回本插件的 hook；插件 CLI 清单则显示本插件已安装且开启。独立 server 结果不能证明桌面当前线程是否加载同一组选定插件，自动登记仍待真实桌面回执。没有更改 hook 信任。真实压缩和中止的专用验收聊天授权已请求，回复前不创建聊天或操作其他聊天。
+
+本节原生协议补丁尚未加载到当前桌面 host；安装缓存和已运行 host 的身份必须分别核对，新包准备及真实操作验收仍是后续步骤。
+
+## 实际漏登记与错误识别
+
+用户指出一个实际额度中断聊天未自动续跑，并明确要求不要再次触发。只读核对确认：该聊天不在此前的 targets 中、待续跑列表无记录，实际最近轮次 failed，错误为官方额度耗尽提示但不含 codexErrorInfo。主代理保存该目标 enabled=false，再确认失败轮次未变化、没有任何 waiting/sending/sent 动作记录；该关闭选择后续不能由 hook 注册覆盖。没有向该聊天发消息或启动新轮次。
+
+自动登记缺口的根因在该精确 CLI 版本 [插件 loader](https://github.com/openai/codex/blob/rust-v0.162.0-alpha.17.2/codex-rs/core-plugins/src/loader.rs#L896-L906)：AgentPlugin 格式被直接赋予空 hook 列表，虽然其 manifest parser 已解析路径。新增 Codex 专用 Legacy-only 分发生成器，保留源码根 manifest 和旧安装文件，仅在全新的 D 盘目录生成兼容布局。主代理独立核对 31 个资源哈希，并用真实原 CLI 的只读 plugin/read 解析出 sessionStart 与 userPromptSubmit 两项 hook。候选尚未安装进真实用户配置，也未信任或执行 hook，不能据此宣称自动登记已经恢复。
+
+错误识别另有缺口：原检测只接受 typed codexErrorInfo，会漏掉当前桌面的实际错误形状。隔离回放先证明不入队，再修为仅在 typed code 缺失时接受精确后端额度错误前缀；初次收集仍需官方 300 分钟窗口耗尽及服务端 resetAt。已知非额度错误、引用文字和仅周额度耗尽不收集，不从错误文案解析恢复时间。实现代理独立只读审查后补充目标/任务关闭的回归，最终全仓 77/77 通过。真实用户聊天未用于恢复发送测试。
+
+任务列表和手动前台启动的 watcher 在新的用户输入到来后已退出，先前 URL 因此失效。主代理重新用独立后台子进程运行两项服务，随后核对两个实际 PID、监听端口、列表 HTTP 200 和认证 native snapshot。仅队列与面板边界修复已同步到当前 0.2.0 缓存并恢复运行；新压缩协议及 Legacy 自动登记仍待匹配安装升级。所有旧文件备份留在 D 盘，未更改系统环境或 Windows 包身份。
+
 ## 尚需完成
 
 1. observer 已完成本轮修复、回归与安装运行态核对；仍需在真实压缩前后核对样本更新和过期处理。

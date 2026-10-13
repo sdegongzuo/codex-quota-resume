@@ -41,10 +41,21 @@ export class NativeService {
           && current.targets[message.threadId].enabled !== false && currentSnapshot.safeBoundary === true);
     };
     try {
+      if (message.command === 'compact' && (authorize() !== true
+        || this.events.beginCompaction?.(message.threadId, message.id, message.turnId) !== true)) return denied();
       this.router.bridgeRequest({ id: message.id,
         method: message.command === 'compact' ? 'thread/compact/start' : 'turn/interrupt',
         params: message.command === 'compact' ? { threadId: message.threadId }
-          : { threadId: message.threadId, turnId: message.turnId } }, reply, authorize);
-    } catch { denied(); }
+          : { threadId: message.threadId, turnId: message.turnId } }, response => {
+        if (message.command === 'compact') {
+          if (response.error) this.events.invalidateCompaction(message.threadId, message.id);
+          else response = { ...response, result: { ...response.result, operationId: message.id } };
+        }
+        reply(response);
+      }, authorize);
+    } catch {
+      if (message.command === 'compact') this.events.invalidateCompaction?.(message.threadId, message.id);
+      denied();
+    }
   }
 }

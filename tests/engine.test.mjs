@@ -63,6 +63,48 @@ test('tick将白名单原会话的单次input/window观测接入对应压缩状�
 });
 const queued = h => Object.values(h.state.pending).find(item => item.threadId === 'chat');
 
+test('desktop quota error without codexErrorInfo is collected only with exhausted five-hour evidence', async () => {
+  const h = harness();
+  h.snapshot.thread.status.type = 'systemError';
+  h.snapshot.turns[0].error = { message: 'You’ve hit your usage limit. Try again later.', additionalDetails: null };
+  await h.run(150);
+  assert.equal(queued(h)?.phase, 'waiting');
+  assert.equal(h.sends.length, 0);
+  const weeklyOnly = harness();
+  weeklyOnly.snapshot = structuredClone(h.snapshot);
+  weeklyOnly.usage = quota(false, 10);
+  weeklyOnly.usage.rateLimits.secondary = { windowDurationMins: 10080, usedPercent: 100, resetsAt: 999 };
+  await weeklyOnly.run(150);
+  assert.equal(Object.keys(weeklyOnly.state.pending).length, 0);
+});
+
+test('known non-quota error code and quoted error text do not become quota interruptions', () => {
+  for (const error of [{ codexErrorInfo: 'internalServerError', message: 'You’ve hit your usage limit.' },
+    { message: 'Upstream quoted: You’ve hit your usage limit.' }, { message: 'Network connection lost' }]) {
+    const snapshot = failure();
+    snapshot.turns[0].error = error;
+    assert.equal(quotaFailure(snapshot, 100, quota()), null);
+  }
+});
+
+test('message-only quota errors preserve closed target and closed item choices', async () => {
+  const closedTarget = harness();
+  closedTarget.snapshot.turns[0].error = { codexErrorInfo: null, message: "You've hit your usage limit." };
+  closedTarget.config.targets.chat.enabled = false;
+  await closedTarget.run(150);
+  assert.equal(Object.keys(closedTarget.state.pending).length, 0);
+  assert.equal(closedTarget.sends.length, 0);
+  const closedItem = harness();
+  closedItem.snapshot.turns[0].error = { message: 'You’ve hit your usage limit.' };
+  await closedItem.run(150);
+  const item = queued(closedItem);
+  closedItem.config.items = { [item.id]: { enabled: false } };
+  closedItem.usage = quota(true, 0);
+  await closedItem.run(350);
+  assert.equal(closedItem.sends.length, 0);
+  assert.equal(item.autoResumeEnabled, false);
+});
+
 test('手动继续队列中的会话时阻挡自动发送并保留等待项', async () => {
   const h = harness();
   await h.run(150);
@@ -75,7 +117,37 @@ test('手动继续队列中的会话时阻挡自动发送并保留等待项', as
   assert.equal(queued(h).phase, 'manual_running');
   h.snapshot.turns[0].status = 'completed';
   await h.run(350);
+  assert.equal(queued(h).phase, 'manual_running', '忙碌状态不能被旧的终止轮次释放');
+  h.snapshot.thread.status.type = 'idle';
+  await h.run(360);
   assert.equal(queued(h).phase, 'turn_completed');
+});
+
+test('当前原生 activeFlags 的用户等待状态保留自动续跑的串行槽位', async () => {
+  for (const flag of ['waitingOnApproval', 'waitingOnUserInput']) {
+    const h = harness();
+    await h.run(150);
+    const entry = queued(h);
+    entry.phase = 'running';
+    h.state.activeAutoResume = entry.id;
+    h.snapshot.thread.status = { type: 'active', activeFlags: [flag] };
+    h.snapshot.turns[0] = { id: 'accepted-turn', status: 'inProgress' };
+    h.usage = quota(true, 0);
+    await h.run(350);
+    assert.equal(entry.phase, 'needs_user');
+    assert.equal(h.state.activeAutoResume, entry.id);
+    assert.equal(h.sends.length, 0);
+    h.snapshot.thread.status = { type: flag };
+    h.snapshot.turns[0].status = 'completed';
+    await h.run(355);
+    assert.equal(entry.phase, 'needs_user');
+    assert.equal(h.state.activeAutoResume, entry.id);
+    h.snapshot.thread.status = { type: 'idle' };
+    h.snapshot.turns[0].status = 'completed';
+    await h.run(360);
+    assert.equal(entry.phase, 'turn_completed');
+    assert.equal(h.state.activeAutoResume, null);
+  }
 });
 
 test('队列按账号、宿主和原会话合并；只显示最新项但保留历史次数和最新项开关', () => {

@@ -11,13 +11,21 @@ export function exhaustedUntil(usage) {
   return fiveHour.length ? Math.max(...fiveHour.map(window => window.resetsAt)) : null;
 }
 
+const isQuotaError = error => {
+  const code = error?.codexErrorInfo;
+  if (code !== undefined && code !== null) return ['usageLimitExceeded', 'rateLimitExceeded'].includes(code);
+  // Current Desktop read_thread can omit the typed code from a real failed turn.
+  // This exact backend prefix is only a fallback; initial collection still requires
+  // the official exhausted five-hour window and its server reset timestamp below.
+  return typeof error?.message === 'string' && /^You[’']ve hit your usage limit\./.test(error.message);
+};
+
 export function quotaFailure(snapshot, armedAt, usage) {
   const turn = snapshot.turns?.[0];
   if (snapshot.thread?.kind !== 'codex' || turn?.status !== 'failed'
     || !turn.completedAt || turn.completedAt < armedAt) return null;
-  const code = turn.error?.codexErrorInfo;
   // 普通网络故障、用户中断和每分钟速率限制不能误认为五小时额度中断。
-  if (code !== 'usageLimitExceeded' && code !== 'rateLimitExceeded') return null;
+  if (!isQuotaError(turn.error)) return null;
   const resetAt = exhaustedUntil(usage);
   return resetAt === null ? null : { turnId: turn.id, resetAt };
 }
@@ -27,16 +35,18 @@ export function sameFailure(snapshot, pending) {
   return snapshot.thread?.kind === 'codex'
     && ['idle', 'systemError', 'notLoaded'].includes(snapshot.thread?.status?.type)
     && turn?.id === pending.turnId && turn.status === 'failed'
-    && ['usageLimitExceeded', 'rateLimitExceeded'].includes(turn.error?.codexErrorInfo);
+    && isQuotaError(turn.error);
 }
 
 const statusOf = snapshot => {
   const threadType = snapshot.thread?.status?.type;
+  const activeFlags = snapshot.thread?.status?.activeFlags;
   const turnStatus = snapshot.turns?.[0]?.status;
-  if (['waitingOnApproval', 'needsInput', 'waiting_on_user_input'].includes(threadType)) return 'needs_user';
+  if (['waitingOnApproval', 'waitingOnUserInput', 'needsInput', 'waiting_on_user_input'].includes(threadType)
+    || (Array.isArray(activeFlags) && activeFlags.some(flag => ['waitingOnApproval', 'waitingOnUserInput'].includes(flag)))) return 'needs_user';
+  if (turnStatus === 'inProgress' || ['active', 'busy', 'working'].includes(threadType)) return 'running';
   if (turnStatus === 'completed') return 'turn_completed';
   if (turnStatus === 'interrupted') return 'stopped';
-  if (turnStatus === 'inProgress' || ['busy', 'working'].includes(threadType)) return 'running';
   if (turnStatus === 'failed') return 'failed';
   return null;
 };
@@ -135,6 +145,12 @@ export async function tick({ desktop, config, state, now, persist, log, stillEna
     const status = statusOf(snapshot);
     if (!status) return; // Stale or unavailable acknowledgement must not free the slot.
     const latestTurn = snapshot.turns?.[0];
+    if (status === 'needs_user') {
+      active.phase = 'needs_user';
+      if (latestTurn?.status === 'inProgress') active.runningTurnId = latestTurn.id;
+      active.reason = '当前续跑轮次正在等待用户处理；保留串行执行槽位，避免启动下一个任务';
+      await persist(); return;
+    }
     if (status === 'running') {
       active.phase = 'running';
       active.runningTurnId = latestTurn?.id;
@@ -234,7 +250,7 @@ export async function tick({ desktop, config, state, now, persist, log, stillEna
         accountId: usage.accountId ?? null,
         autoResumeEnabled: config.items?.[id]?.enabled ?? true, phase: 'waiting' };
       pending.hostId = config.hostId ?? 'local';
-      pending.reason = '活动上下文及真实压缩接口尚未提供；额度续跑独立排队';
+      pending.reason = '五小时额度中断已登记；等待恢复时间及实际使用许可后继续原会话';
       await persist();
       await log('waiting', { threadId, turnId: failure.turnId, resetAt: failure.resetAt });
     }

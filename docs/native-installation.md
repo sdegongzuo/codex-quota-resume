@@ -14,6 +14,16 @@
 
 启动脚本只为新桌面进程设置 D 盘包内 `tmp` 目录作为 TEMP、TMP、TMPDIR，系统环境保持原值。
 
+## Codex Legacy hook 兼容探针
+
+Codex CLI `0.162.0-alpha.17.2` 的上游 loader 会解析 Agent Plugins 根 `plugin.json` 中的 `extensions.com.openai.hooks` 路径，但随后对所有 `AgentPlugin` 格式直接返回空 hook 列表。Codex 的 `.codex-plugin/plugin.json` 兼容格式仍会进入 hook loader。详见该版本的 [loader 分支](https://github.com/openai/codex/blob/rust-v0.162.0-alpha.17.2/codex-rs/core-plugins/src/loader.rs#L896-L906)。因此本仓库保留可移植的根 `plugin.json`，并用下列脚本另外生成一个 Codex 专用 Legacy-only 探针包；生成包内没有根 `plugin.json`，版本和插件名从当前源文件校验，不覆盖源目录或已有安装：
+
+```powershell
+rtk proxy node "D:\dev\codex-quota-resume\scripts\prepare-legacy-plugin.mjs" --prepare-only
+```
+
+脚本默认使用随机唯一目录 `D:\dev\codex-quota-resume\.test-evidence\legacy-plugin-probe\<UUID>`；也可通过 `--target` 指定一个全新的 D 盘绝对路径。它会在目标根生成 `.agents/plugins/marketplace.json`，其 local source 指向同一新目标内的 `codex-quota-resume` 子目录；插件目录只包含 `.codex-plugin/plugin.json`、hooks、skills、运行脚本和文档，并在 `generation-manifest.json` 列出每个文件的版本和 SHA-256。此探针只供 standalone `plugin/read` 与 `hooks/list` 只读验收，不执行 hook、不信任 hook，也不安装进真实用户配置。真实安装或升级仍需由维护者另行协调并确认。
+
 ## 独立验收要求
 
 1. 目标及真实父路径留在 D 盘，现有配置/历史文件未改。

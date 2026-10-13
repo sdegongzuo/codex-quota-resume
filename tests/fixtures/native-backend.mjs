@@ -16,11 +16,16 @@ lines.on('line', line => {
   } else if (message.method === 'account/rateLimits/read') {
     send({ id: message.id, result: { rateLimits: { primary: { windowDurationMins: 300, usedPercent: 10 } } } });
   } else if (message.method === 'thread/compact/start') {
-    send({ id: message.id, result: {} });
-    send({ method: 'item/completed', params: { threadId: 'synthetic-target', turnId,
+    turnId = 'synthetic-compact-turn';
+    send({ method: 'turn/started', params: { threadId: 'synthetic-target', turn: { id: turnId } } });
+    send({ method: 'item/started', params: { threadId: 'synthetic-target', turnId,
       item: { id: 'synthetic-compaction', type: 'contextCompaction' } } });
+    send({ id: message.id, result: {} });
     send({ method: 'thread/tokenUsage/updated', params: { threadId: 'synthetic-target', turnId,
       tokenUsage: { last: { totalTokens: 10 }, modelContextWindow: 100 } } });
+    send({ method: 'item/completed', params: { threadId: 'synthetic-target', turnId,
+      item: { id: 'synthetic-compaction', type: 'contextCompaction' } } });
+    send({ method: 'turn/completed', params: { threadId: 'synthetic-target', turn: { id: turnId, status: 'completed' } } });
   } else if (message.method === 'turn/interrupt') {
     send({ id: message.id, result: {} });
     send({ method: 'turn/completed', params: { threadId: 'synthetic-target',

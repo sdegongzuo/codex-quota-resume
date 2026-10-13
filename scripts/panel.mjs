@@ -2,7 +2,7 @@ import { createServer } from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { records, append, configuration, taskId } from './store.mjs';
 
-export function projectQueue(pending, config) {
+export function projectQueue(pending, config, activeAutoResume) {
   const groups = new Map();
   for (const item of Object.values(pending ?? {})) {
     const key = JSON.stringify([item.accountId ?? 'unknown-account', item.hostId ?? 'local', item.threadId]);
@@ -28,6 +28,8 @@ export function projectQueue(pending, config) {
     interruptedAt: item.interruptedAt, eligibleAt: item.eligibleAt,
     phase: item.phase, reason: item.reason, historyCount,
     runningTurnId: item.runningTurnId ?? null,
+    canStop: !!item.runningTurnId && (item.phase === 'running'
+      || (item.phase === 'needs_user' && activeAutoResume === item.id)),
     isLatest: selectedIsLatest,
     itemEnabled: itemConfig.enabled ?? item.autoResumeEnabled ?? true,
     manualResolutionRequested: Number.isFinite(itemConfig.manualResolutionRequestedAt)
@@ -58,7 +60,7 @@ function json(response, status, value) {
 function withStopPanel(page, token, enabled) {
   if (!enabled) return page;
   const section = '<section id="running-controls"><h2>正在续跑的任务</h2><div id="running-items"></div></section>';
-  const script = `<script>(function(){const token=${JSON.stringify(token)};const host=document.getElementById('running-items');async function refresh(){try{const response=await fetch('/api/state',{headers:{'x-quota-resume-token':token}});const state=await response.json();host.replaceChildren();const items=state.items.filter(item=>item.phase==='running'&&item.runningTurnId);if(!items.length){host.textContent='当前没有正在自动续跑的任务';return}for(const item of items){const row=document.createElement('div');const label=document.createElement('span');label.textContent=item.name||'原会话';row.append(label);const button=document.createElement('button');button.textContent='停止任务并关闭自动续跑';button.style.marginLeft='8px';const result=document.createElement('span');button.onclick=async()=>{button.disabled=true;result.textContent=' 正在请求停止';try{const response=await fetch('/api/stop',{method:'POST',headers:{'content-type':'application/json','x-quota-resume-token':token},body:JSON.stringify({id:item.id,turnId:item.runningTurnId})});const value=await response.json();if(!response.ok)throw Error(value.error||'停止请求失败');result.textContent=value.operation?.status==='completed'?' 已确认停止':value.operation?.status==='already_ended'?' 该轮次已结束':' 停止结果待核对，请打开原会话确认';}catch(error){result.textContent=' '+error.message;} };row.append(button,result);host.append(row)}}catch{host.textContent='读取运行任务失败，请刷新页面'}}refresh();setInterval(refresh,30000)})();</script>`;
+  const script = `<script>(function(){const token=${JSON.stringify(token)};const host=document.getElementById('running-items');async function refresh(){try{const response=await fetch('/api/state',{headers:{'x-quota-resume-token':token}});const state=await response.json();host.replaceChildren();const items=state.items.filter(item=>item.canStop&&item.runningTurnId);if(!items.length){host.textContent='当前没有正在自动续跑的任务';return}for(const item of items){const row=document.createElement('div');const label=document.createElement('span');label.textContent=item.name||'原会话';row.append(label);const button=document.createElement('button');button.textContent='停止任务并关闭自动续跑';button.style.marginLeft='8px';const result=document.createElement('span');button.onclick=async()=>{button.disabled=true;result.textContent=' 正在请求停止';try{const response=await fetch('/api/stop',{method:'POST',headers:{'content-type':'application/json','x-quota-resume-token':token},body:JSON.stringify({id:item.id,turnId:item.runningTurnId})});const value=await response.json();if(!response.ok)throw Error(value.error||'停止请求失败');result.textContent=value.operation?.status==='completed'?' 已确认停止':value.operation?.status==='already_ended'?' 该轮次已结束':' 停止结果待核对，请打开原会话确认';}catch(error){result.textContent=' '+error.message;} };row.append(button,result);host.append(row)}}catch{host.textContent='读取运行任务失败，请刷新页面'}}refresh();setInterval(refresh,30000)})();</script>`;
   return page.replace('立即停止正在运行的任务，请打开对应原会话并使用桌面“停止”按钮。此列表开关只控制自动续跑。',
     '列表开关控制后续自动续跑。正在续跑的任务可使用下方停止按钮；结果待核对时请打开原会话确认。')
     .replace('<main id="items"></main>', '<main id="items"></main>' + section)
@@ -89,7 +91,7 @@ export function startPanel({ host = '127.0.0.1', port = 0, configPath, statePath
     const config = configuration(configPath);
     if (request.method === 'GET' && request.url === '/api/state') {
       const state = records(statePath).at(-1) ?? { pending: {} };
-      const items = projectQueue(state.pending, config);
+      const items = projectQueue(state.pending, config, state.activeAutoResume);
       const connection = state.connection ? {
         status: state.connection.status,
         observedAt: state.connection.observedAt,
@@ -146,7 +148,8 @@ export function startPanel({ host = '127.0.0.1', port = 0, configPath, statePath
       const state = records(statePath).at(-1) ?? { pending: {} };
       const item = Object.values(state.pending ?? {}).find(candidate =>
         taskId(candidate.accountId, candidate.hostId, candidate.threadId, candidate.turnId) === value.id);
-      if (!item || item.phase !== 'running' || !item.runningTurnId || item.runningTurnId !== value.turnId) {
+      if (!item || !(item.phase === 'running' || (item.phase === 'needs_user' && state.activeAutoResume === item.id))
+        || !item.runningTurnId || item.runningTurnId !== value.turnId) {
         return json(response, 409, { error: '运行轮次已变化，请刷新任务列表后操作' });
       }
       // Retain the user's stop choice before requesting the backend operation.

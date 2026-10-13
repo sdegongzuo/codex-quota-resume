@@ -16,11 +16,15 @@ test('worker authenticates service and confirms compaction through framed RPC pl
   let calls = 0, router;
   router = new NativeRouter({ renderer: () => {}, backend: message => {
     calls++;
-    router.backendMessage({ id: message.id, result: {} });
-    events.observe({ method: 'item/completed', params: { threadId: 'target', turnId: 't1',
+    events.observe({ method: 'turn/started', params: { threadId: 'target', turn: { id: 'compact-turn' } } });
+    events.observe({ method: 'item/started', params: { threadId: 'target', turnId: 'compact-turn',
       item: { id: 'compaction1', type: 'contextCompaction' } } });
-    events.observe({ method: 'thread/tokenUsage/updated', params: { threadId: 'target', turnId: 't1',
+    events.observe({ method: 'thread/tokenUsage/updated', params: { threadId: 'target', turnId: 'compact-turn',
       tokenUsage: { last: { totalTokens: 20 }, modelContextWindow: 100 } } });
+    events.observe({ method: 'item/completed', params: { threadId: 'target', turnId: 'compact-turn',
+      item: { id: 'compaction1', type: 'contextCompaction' } } });
+    events.observe({ method: 'turn/completed', params: { threadId: 'target', turn: { id: 'compact-turn', status: 'completed' } } });
+    router.backendMessage({ id: message.id, result: {} });
   } });
   const service = new NativeService({ token, router, events, configuration: () => config,
     ordinaryUsageAllowed: async () => true });
@@ -43,6 +47,7 @@ test('worker authenticates service and confirms compaction through framed RPC pl
     const result = await worker.perform(operation);
     assert.equal(result.status, 'completed');
     assert.equal(result.after.activeTokens, 20);
+    assert.equal(result.compactTurnId, 'compact-turn');
     await worker.perform(operation);
     assert.equal(calls, 1);
     assert.equal(records[0].status, 'sending');

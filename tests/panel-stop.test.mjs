@@ -41,3 +41,31 @@ test('panel stop binds running turn and persists disabled choices before operati
     assert.equal(calls, 1);
   } finally { await new Promise(resolvePromise => panel.server.close(resolvePromise)); }
 });
+
+test('waiting user turn keeps its stop control only while owning the automatic execution slot', async () => {
+  const directory = resolve('.acceptance-data', `panel-waiting-stop-${randomUUID()}`);
+  mkdirSync(directory, { recursive: true });
+  const configPath = join(directory, 'config.jsonl'), statePath = join(directory, 'state.jsonl');
+  const item = { accountId: 'synthetic', hostId: 'local', threadId: 'synthetic-target', turnId: 'failed-turn',
+    runningTurnId: 'waiting-turn', phase: 'needs_user' };
+  const id = taskId(item.accountId, item.hostId, item.threadId, item.turnId);
+  append(configPath, { type: 'target', threadId: item.threadId, value: { enabled: true } });
+  append(statePath, { pending: { [id]: { ...item, id } } });
+  let calls = 0;
+  const panel = startPanel({ configPath, statePath, capabilities: {}, onStop: async () => { calls++; return { status: 'completed' }; } });
+  await new Promise(resolvePromise => panel.server.once('listening', resolvePromise));
+  const url = new URL(panel.getUrl());
+  const headers = { 'content-type': 'application/json', 'x-quota-resume-token': panel.token };
+  const state = async () => (await fetch(`${url.origin}/api/state`, { headers })).json();
+  const stop = async () => fetch(`${url.origin}/api/stop`, { method: 'POST', headers,
+    body: JSON.stringify({ id, turnId: item.runningTurnId }) });
+  try {
+    assert.equal((await state()).items[0].canStop, false);
+    assert.equal((await stop()).status, 409);
+    append(statePath, { pending: { [id]: { ...item, id } }, activeAutoResume: id });
+    assert.equal((await state()).items[0].canStop, true);
+    assert.equal((await stop()).status, 200);
+    assert.equal(calls, 1);
+    assert.equal(configuration(configPath).targets[item.threadId].enabled, false);
+  } finally { await new Promise(resolvePromise => panel.server.close(resolvePromise)); }
+});
