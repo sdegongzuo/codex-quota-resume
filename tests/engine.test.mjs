@@ -75,7 +75,192 @@ test('desktop quota error without codexErrorInfo is collected only with exhauste
   weeklyOnly.usage = quota(false, 10);
   weeklyOnly.usage.rateLimits.secondary = { windowDurationMins: 10080, usedPercent: 100, resetsAt: 999 };
   await weeklyOnly.run(150);
-  assert.equal(Object.keys(weeklyOnly.state.pending).length, 0);
+  assert.equal(Object.values(weeklyOnly.state.pending).length, 1);
+  assert.equal(Object.values(weeklyOnly.state.pending)[0].phase, 'needs_review',
+    '精确额度错误仍需登记，但没有官方五小时证据时不得自动等待或续跑');
+});
+
+test('恢复后的精确额度失败先记needs_review；只有同账号中断时段官方耗尽观测能补回reset', async () => {
+  const h = harness();
+  h.snapshot.thread.status.type = 'systemError';
+  h.snapshot.turns[0].error = { message: "You've hit your usage limit." };
+  h.usage = quota(true, 0); // quota 已恢复，当前API不再提供五小时 resetAt
+  await h.run(150);
+  const item = queued(h);
+  assert.ok(item, '额度失败仍要持久记录');
+  assert.equal(item.phase, 'needs_review');
+  assert.equal(item.resetAt, null);
+  assert.equal(item.eligibleAt, null);
+  assert.equal(h.sends.length, 0);
+
+  h.state.quotaObservationsByAccount = { 'account-a': [
+    { accountId: 'account-a', observedAt: 110, exhaustedFiveHour: true, resetAt: 200 },
+  ] };
+  await h.run(160);
+  assert.equal(item.phase, 'waiting');
+  assert.equal(item.resetAt, 200);
+  assert.equal(item.eligibleAt, 320);
+  assert.equal(h.sends.length, 0);
+});
+
+test('不相关账号或中断时段外的额度观测不能升级needs_review', async () => {
+  const h = harness();
+  h.snapshot.thread.status.type = 'systemError';
+  h.snapshot.turns[0].error = { message: "You've hit your usage limit." };
+  h.usage = quota(true, 0);
+  await h.run(150);
+  h.state.quotaObservationsByAccount = {
+    'account-b': [{ accountId: 'account-b', observedAt: 110, exhaustedFiveHour: true, resetAt: 200 }],
+    'account-a': [{ accountId: 'account-a', observedAt: 10, exhaustedFiveHour: true, resetAt: 200 }],
+  };
+  await h.run(160);
+  assert.equal(queued(h).phase, 'needs_review');
+  assert.equal(queued(h).resetAt, null);
+  assert.equal(h.sends.length, 0);
+});
+
+test('频繁许可观测不会挤掉仍需用于中断关联的近期耗尽证据', async () => {
+  const h = harness();
+  h.config.targets.chat.enabled = false;
+  h.usage = quota(true, 0);
+  h.state.quotaObservationsByAccount = { 'account-a': [
+    { accountId: 'account-a', observedAt: 110, exhaustedFiveHour: true, resetAt: 200 },
+  ] };
+  for (let now = 300; now < 1500; now += 30) await h.run(now);
+  assert.ok(h.state.quotaObservationsByAccount['account-a'].some(sample =>
+    sample.exhaustedFiveHour === true && sample.observedAt === 110 && sample.resetAt === 200));
+  assert.ok(h.state.quotaObservationsByAccount['account-a'].length <= 12);
+});
+
+test('稍后读取到的新五小时额度周期不能补给更早的失败轮次', async () => {
+  const h = harness();
+  h.snapshot.thread.status.type = 'systemError';
+  h.snapshot.turns[0].error = { message: "You've hit your usage limit." };
+  await h.run(1000);
+  assert.equal(queued(h).phase, 'needs_review');
+  assert.equal(queued(h).resetAt, null);
+  assert.equal(h.sends.length, 0);
+});
+
+test('missing-reset needs_review 历史项不阻挡同聊天的新失败，旧轮次转入历史状态', async () => {
+  const h = harness();
+  const oldId = taskId('account-a', 'local', 'chat', 'failed-turn');
+  h.state.pending[oldId] = { id: oldId, threadId: 'chat', hostId: 'local', accountId: 'account-a',
+    turnId: 'failed-turn', phase: 'needs_review', resetEvidenceStatus: 'missing',
+    interruptedAt: 110, armedAt: 100, autoResumeEnabled: true };
+  h.snapshot = { ...failure(), turns: [{ ...failure().turns[0], id: 'new-failed-turn', completedAt: 160 }] };
+  await h.run(170);
+  assert.equal(h.state.pending[oldId].phase, 'superseded');
+  assert.ok(Object.values(h.state.pending).some(item => item.threadId === 'chat'
+    && item.turnId === 'new-failed-turn' && item.phase === 'waiting'));
+  assert.equal(h.sends.length, 0);
+});
+
+test('目录临时失败仍采集已登记目标，但本轮不发现、不压缩或发送', async () => {
+  const h = harness();
+  h.snapshot.thread.status.type = 'systemError';
+  h.snapshot.turns[0].error = { message: "You've hit your usage limit." };
+  let reads = 0;
+  let compressions = 0;
+  h.desktop.call = async name => {
+    if (name === 'list_threads') { const error = new Error('private'); error.code = 'EPIPE'; throw error; }
+    if (name === 'get_usage_limits') return quota(false, 100);
+    if (name === 'read_thread') { reads++; return h.snapshot; }
+    if (name === 'send_message_to_thread') { h.sends.push(name); return { accepted: true }; }
+    throw new Error(`unexpected ${name}`);
+  };
+  h.desktop.capabilities = async () => { compressions++; return { activeContextUsage: 'available' }; };
+  h.desktop.contextUsage = async () => { compressions++; return {}; };
+  await h.run(150);
+  assert.equal(reads, 1);
+  assert.equal(Object.values(h.state.pending).some(item => item.threadId === 'chat'), true);
+  assert.equal(h.state.catalogReadFailure.method, 'list_threads');
+  assert.equal(h.sends.length, 0);
+  assert.equal(compressions, 0);
+});
+
+test('活跃续跑槽位提前返回前先扫描并持久记录新失败聊天', async () => {
+  const h = harness();
+  const activeId = 'active-slot';
+  h.state.pending[activeId] = { id: activeId, threadId: 'chat', hostId: 'local',
+    accountId: 'account-a', turnId: 'old-failure', phase: 'running', autoResumeEnabled: true };
+  h.state.activeAutoResume = activeId;
+  h.snapshot.thread.status.type = 'busy';
+  h.snapshot.turns[0] = { id: 'accepted-turn', status: 'inProgress' };
+  h.config.monitoringSince = 100;
+  h.config.targets = {};
+  h.desktop.call = async (name, args) => {
+    if (name === 'list_threads') return { threads: [{ id: 'new-chat', kind: 'codex', title: 'new' }] };
+    if (name === 'get_usage_limits') return quota(true, 0);
+    if (name === 'read_thread' && args.threadId === 'chat') return h.snapshot;
+    if (name === 'read_thread' && args.threadId === 'new-chat') return failure();
+    if (name === 'send_message_to_thread') { h.sends.push(args); return { accepted: true }; }
+    throw new Error(`unexpected ${name}`);
+  };
+  const registrations = [];
+  h.registerTarget = async target => { registrations.push(target); };
+  await h.run(150);
+  assert.equal(registrations.length, 1);
+  assert.equal(registrations[0].threadId, 'new-chat');
+  assert.equal(registrations[0].armedAt, 100);
+  assert.equal(Object.values(h.state.pending).some(item => item.threadId === 'new-chat'), true);
+  assert.equal(h.state.activeAutoResume, activeId);
+  assert.equal(h.sends.length, 0);
+});
+
+test('目录自动登记只接受当前host的主codex聊天且read_thread失败相互隔离', async () => {
+  const h = harness();
+  h.config.hostId = 'local';
+  h.config.monitoringSince = 100;
+  h.config.targets = { closed: { enabled: false, armedAt: 90, name: 'closed' } };
+  const snapshots = {
+    'fresh-chat': failure(),
+    'bad-read': new Error('private message must not persist'),
+  };
+  snapshots['fresh-chat'].thread.status.type = 'systemError';
+  snapshots['fresh-chat'].turns[0].error = { message: "You've hit your usage limit." };
+  h.desktop.call = async (name, args) => {
+    if (name === 'list_threads') return { threads: [
+      { id: 'fresh-chat', kind: 'codex', title: 'Fresh' },
+      { id: 'bad-read', kind: 'codex' },
+      { id: 'child', kind: 'codex', parentThreadId: 'fresh-chat' },
+      { id: 'agent', kind: 'codex', agentId: 'agent-1' },
+      { id: 'remote', kind: 'codex', hostId: 'other-host' },
+      { id: 'non-codex', kind: 'chatgpt' },
+    ] };
+    if (name === 'get_usage_limits') return quota(true, 0);
+    if (name === 'read_thread') {
+      const value = snapshots[args.threadId];
+      if (value instanceof Error) { const error = new Error(value.message); error.code = 'EPIPE'; throw error; }
+      return value ?? failure();
+    }
+    if (name === 'send_message_to_thread') { h.sends.push(args); return { accepted: true }; }
+    throw new Error(`unexpected ${name}`);
+  };
+  const registrations = [];
+  h.registerTarget = async entry => { registrations.push(entry); };
+  await h.run(150);
+  assert.deepEqual(registrations.map(entry => entry.threadId), ['fresh-chat', 'bad-read']);
+  assert.equal(h.config.targets.closed.enabled, false);
+  assert.equal(Object.values(h.state.pending).find(item => item.threadId === 'fresh-chat')?.threadId, 'fresh-chat');
+  assert.deepEqual(h.state.readFailuresByTarget['bad-read'],
+    { method: 'read_thread', code: 'EPIPE', observedAt: 150 });
+  assert.equal(JSON.stringify(h.state).includes('private message'), false);
+});
+
+test('目录注册回调拒绝或关闭竞争发生时，不在本轮启用未持久化目标', async () => {
+  const h = harness();
+  h.config.targets = {};
+  h.config.monitoringSince = 100;
+  h.desktop.call = async (name) => name === 'list_threads'
+    ? { threads: [{ id: 'new-chat', kind: 'codex' }] }
+    : name === 'get_usage_limits' ? quota(true, 0)
+      : (() => { throw new Error(`unexpected ${name}`); })();
+  h.registerTarget = async () => false;
+  await h.run(150);
+  assert.equal(h.config.targets['new-chat'], undefined);
+  assert.equal(h.state.discoveredTargets['new-chat'], undefined);
+  assert.equal(Object.keys(h.state.pending).length, 0);
 });
 
 test('known non-quota error code and quoted error text do not become quota interruptions', () => {

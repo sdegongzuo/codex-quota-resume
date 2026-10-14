@@ -41,3 +41,26 @@ test('命名管道分片响应与工具路由保持原聊天身份', async () =>
 test('缺少 Codex 桌面身份时明确失败', () => {
   assert.throws(() => new Desktop({ pipe: '', callerThread: '' }), /需要在 Codex 聊天中启动/);
 });
+
+test('工具失败保留具体方法与安全错误码，诊断不保存返回正文', async () => {
+  const desktop = new Desktop({ pipe: 'fixture', callerThread: 'owner-chat' });
+  desktop.tools = [{ name: 'read_thread', namespace: 'codex_app' }];
+  desktop.request = async () => ({ success: false,
+    contentItems: [{ type: 'inputText', text: 'private-token-and-user-content' }] });
+  await assert.rejects(desktop.call('read_thread', { threadId: 'target' }), error => {
+    assert.equal(error.tool, 'read_thread');
+    assert.equal(error.code, 'DESKTOP_TOOL_FAILED');
+    assert.equal(JSON.stringify(error.diagnostic).includes('private-token'), false);
+    assert.deepEqual(error.diagnostic, { method: 'read_thread', code: 'DESKTOP_TOOL_FAILED' });
+    return true;
+  });
+});
+
+test('连接失败诊断区分工具发现与实际调用', async () => {
+  const desktop = new Desktop({ pipe: 'fixture', callerThread: 'owner-chat' });
+  desktop.request = async () => { throw Object.assign(Error('pipe-secret'), { code: 'ENOENT' }); };
+  await assert.rejects(desktop.call('get_usage_limits'), error => {
+    assert.deepEqual(error.diagnostic, { method: 'tools/list', code: 'ENOENT' });
+    return true;
+  });
+});

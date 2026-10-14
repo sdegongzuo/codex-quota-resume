@@ -21,6 +21,11 @@ export function append(path, value) {
 export function configuration(path) {
   const result = { schemaVersion: 2, enabled: true, targets: {}, items: {}, intervalSeconds: 30,
     compactionThresholdRatio: 0.6, resumeBufferSeconds: 120, recoveryRetrySeconds: 60 };
+  const noteMonitoringStart = armedAt => {
+    if (!Number.isFinite(armedAt)) return;
+    result.monitoringSince = result.monitoringSince === undefined
+      ? armedAt : Math.min(result.monitoringSince, armedAt);
+  };
   for (const entry of records(path)) {
     if (entry.type === 'disable') result.enabled = false;
     if (entry.type === 'global') result.enabled = entry.enabled === true;
@@ -29,6 +34,7 @@ export function configuration(path) {
       result.pipe = entry.pipe;
       result.callerThread = entry.threadId;
       result.hostId = entry.hostId;
+      noteMonitoringStart(entry.armedAt);
       result.targets[entry.threadId] = { ...(result.targets[entry.threadId] ?? {}), enabled: true,
         armedAt: entry.armedAt, name: entry.name ?? result.targets[entry.threadId]?.name ?? entry.threadId };
     }
@@ -36,6 +42,13 @@ export function configuration(path) {
       result.pipe = entry.pipe;
       result.callerThread = entry.threadId;
       result.hostId = entry.hostId;
+      noteMonitoringStart(entry.armedAt);
+      if (!result.targets[entry.threadId]) result.targets[entry.threadId] = {
+        enabled: true, armedAt: entry.armedAt, name: entry.name ?? entry.threadId,
+      };
+    }
+    if (entry.type === 'discover' && entry.hostId === result.hostId
+      && typeof entry.threadId === 'string' && Number.isFinite(entry.armedAt)) {
       if (!result.targets[entry.threadId]) result.targets[entry.threadId] = {
         enabled: true, armedAt: entry.armedAt, name: entry.name ?? entry.threadId,
       };
@@ -55,7 +68,10 @@ export function configuration(path) {
 }
 
 export function migrateState(raw, config) {
-  const state = { ...(raw ?? {}), pending: { ...(raw?.pending ?? {}) }, handled: [...(raw?.handled ?? [])] };
+  const state = { ...(raw ?? {}), pending: { ...(raw?.pending ?? {}) }, handled: [...(raw?.handled ?? [])],
+    discoveredTargets: { ...(raw?.discoveredTargets ?? {}) },
+    quotaObservationsByAccount: { ...(raw?.quotaObservationsByAccount ?? {}) },
+    readFailuresByTarget: { ...(raw?.readFailuresByTarget ?? {}) } };
   let changed = false;
   for (const [oldKey, item] of Object.entries(state.pending)) {
     if (!item?.turnId) continue;

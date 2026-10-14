@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process';
 import net from 'node:net';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
-import { Desktop } from './desktop.mjs';
+import { Desktop, safeDesktopDiagnostic } from './desktop.mjs';
 import { tick } from './engine.mjs';
 import { configuration, records, append, migrateState, shouldLaunchWatcher } from './store.mjs';
 import { startPanel } from './panel.mjs';
@@ -108,6 +108,12 @@ async function watch() {
       try {
           await tick({ desktop: new Desktop({ ...config, native: await nativeBridge(config) }), config, state, now: now(),
           persist: () => append(statePath, state), log,
+          registerTarget: entry => {
+            const current = configuration(configPath);
+            if (!current.enabled || Object.hasOwn(current.targets, entry.threadId)) return false;
+            append(configPath, { type: 'discover', ...entry });
+            log('target_discovered', { threadId: entry.threadId });
+          },
           stillEnabled: (threadId, armedAt, itemId) => {
             const current = configuration(configPath);
             return current.enabled && current.targets[threadId]?.enabled !== false
@@ -119,16 +125,24 @@ async function watch() {
               manualResolutionRequestedAt: null, manualResolutionHandledAt: requestedAt,
             },
           }) });
-        if (state.connection?.status !== 'available') {
-          state.connection = { status: 'available', observedAt: now(), reason: null };
-          append(statePath, state);
-        }
+        const failedTargets = Object.keys(state.readFailuresByTarget ?? {});
+        const requiredFailure = state.catalogReadFailure ?? state.usageReadFailure;
+        const firstTargetFailure = state.readFailuresByTarget?.[failedTargets[0]];
+        state.connection = { status: requiredFailure ? 'unavailable' : failedTargets.length ? 'degraded' : 'available',
+          observedAt: now(),
+          ...(requiredFailure ?? firstTargetFailure ? safeDesktopDiagnostic(requiredFailure ?? firstTargetFailure,
+            (requiredFailure ?? firstTargetFailure).method) : {}),
+          reason: requiredFailure ? `桌面读取失败：${requiredFailure.method} / ${requiredFailure.code}`
+            : failedTargets.length ? `${failedTargets.length} 个聊天读取失败：${firstTargetFailure.method} / ${firstTargetFailure.code}；其他聊天继续监测` : null };
+        append(statePath, state);
       } catch (error) {
-        state.connection = { status: 'unavailable', observedAt: now(), reason: '桌面连接或状态读取失败' };
+        const diagnostic = safeDesktopDiagnostic(error);
+        state.connection = { status: 'unavailable', observedAt: now(), ...diagnostic,
+          reason: `桌面读取失败：${diagnostic.method} / ${diagnostic.code}` };
         try { append(statePath, state); } catch (persistError) {
           log('connection_state_persist_error', { code: persistError.code ?? 'WRITE_ERROR' });
         }
-        log('poll_error', { code: error.code ?? 'RPC_ERROR', reason: '桌面连接或数据读取失败' });
+        log('poll_error', { ...diagnostic, reason: '桌面连接或数据读取失败' });
       }
       await new Promise(resolvePromise => setTimeout(resolvePromise, config.intervalSeconds * 1000));
     }
@@ -141,6 +155,9 @@ async function watch() {
 
 if (command === 'enable') {
   enable(option('--thread') ?? process.env.CODEX_THREAD_ID);
+} else if (command === 'refresh') {
+  enable(option('--thread') ?? process.env.CODEX_THREAD_ID, true, true);
+  console.log(JSON.stringify({ refreshed: true, enabled: configuration(configPath).enabled, dataDir }));
 } else if (command === 'disable') {
   append(configPath, { type: 'disable' });
   log('disabled');
@@ -254,6 +271,6 @@ if (command === 'enable') {
   }
   console.log('{}');
 } else {
-  console.error('用法: node scripts/control.mjs enable|disable|target|settings|panel|status|probe|resolve|watch|hook [--data-dir 目录]');
+  console.error('用法: node scripts/control.mjs enable|refresh|disable|target|settings|panel|status|probe|resolve|watch|hook [--data-dir 目录]');
   process.exitCode = 1;
 }

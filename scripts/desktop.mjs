@@ -5,6 +5,16 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { observeRolloutUsage } from './rollout-usage.mjs';
 
+const diagnosticMethods = new Set(['tools/list', 'get_usage_limits', 'list_threads', 'read_thread', 'send_message_to_thread']);
+const diagnosticCodes = new Set(['ENOENT', 'ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'EACCES', 'ETIMEDOUT',
+  'DESKTOP_TIMEOUT', 'DESKTOP_DISCONNECTED', 'DESKTOP_INVALID_RESPONSE', 'DESKTOP_RPC_ERROR',
+  'DESKTOP_TOOL_FAILED', 'DESKTOP_TOOL_UNAVAILABLE', 'RPC_ERROR']);
+export function safeDesktopDiagnostic(error, method = error?.tool) {
+  return { method: diagnosticMethods.has(method) ? method : 'unknown',
+    code: diagnosticCodes.has(error?.code) ? error.code : 'RPC_ERROR' };
+}
+const rpcError = (code, message) => Object.assign(new Error(message), { code });
+
 // 使用本机 Codex 插件提供的命名管道；不读取凭据、不启动第二个聊天执行器。
 export class Desktop {
   constructor({ pipe = process.env.CODEX_APP_TOOLS_PIPE_PATH,
@@ -42,9 +52,9 @@ export class Desktop {
         socket.destroy();
         if (error) reject(error); else resolve(result);
       };
-      const timer = setTimeout(() => finish(new Error(`桌面接口超时: ${method}`)), 20000);
+      const timer = setTimeout(() => finish(rpcError('DESKTOP_TIMEOUT', `桌面接口超时: ${method}`)), 20000);
       socket.on('error', error => finish(error));
-      socket.on('end', () => finish(new Error('桌面连接已关闭')));
+      socket.on('end', () => finish(rpcError('DESKTOP_DISCONNECTED', '桌面连接已关闭')));
       socket.on('connect', () => {
         const body = Buffer.from(JSON.stringify({ jsonrpc: '2.0', id, method, params }));
         const frame = Buffer.alloc(body.length + 4);
@@ -56,38 +66,53 @@ export class Desktop {
         buffer = Buffer.concat([buffer, chunk]);
         if (buffer.length < 4) return;
         const length = buffer.readUInt32LE();
-        if (length > 16 * 1024 * 1024) return finish(new Error('桌面响应过大'));
+        if (length > 16 * 1024 * 1024) return finish(rpcError('DESKTOP_INVALID_RESPONSE', '桌面响应过大'));
         if (buffer.length < length + 4) return;
         try {
           const message = JSON.parse(buffer.subarray(4, length + 4).toString());
-          if (message.id !== id) return finish(new Error('桌面响应 ID 不匹配'));
-          if (message.error) finish(new Error(message.error.message));
+          if (message.id !== id) return finish(rpcError('DESKTOP_INVALID_RESPONSE', '桌面响应 ID 不匹配'));
+          if (message.error) finish(rpcError('DESKTOP_RPC_ERROR', '桌面 RPC 返回错误'));
           else finish(null, message.result);
-        } catch (error) { finish(error); }
+        } catch { finish(rpcError('DESKTOP_INVALID_RESPONSE', '桌面响应格式无效')); }
       });
     });
   }
 
   async call(name, args = {}) {
+    let method = this.tools ? name : 'tools/list';
+    try {
     if (!this.tools) this.tools = (await this.request('tools/list', { threadStartKind: 'all' })).tools;
+    method = name;
     const tool = this.tools.find(tool => tool.name === name);
-    if (!tool) throw new Error(`当前 Codex 不支持桌面工具: ${name}`);
+    if (!tool) throw rpcError('DESKTOP_TOOL_UNAVAILABLE', `当前 Codex 不支持桌面工具: ${name}`);
     const result = await this.request('tools/call', {
       namespace: tool.namespace, tool: name, arguments: args,
       callerSource: 'codex', threadId: this.callerThread, hostId: this.hostId,
       callId: `quota-resume-${randomUUID()}`, turnId: `quota-resume-${randomUUID()}`,
     });
     const texts = (result.contentItems ?? []).filter(x => x.type === 'inputText').map(x => x.text);
-    if (!result.success) throw new Error(texts.join('\n') || '桌面工具失败');
+    if (!result.success) throw rpcError('DESKTOP_TOOL_FAILED', '桌面工具调用失败');
     for (const value of texts) {
       try { return JSON.parse(value); } catch { /* 部分版本返回纯文本 */ }
     }
     if (name === 'send_message_to_thread') return { accepted: true };
-    throw new Error(`桌面工具未返回结构化数据: ${name}`);
+    throw rpcError('DESKTOP_INVALID_RESPONSE', `桌面工具未返回结构化数据: ${name}`);
+    } catch (error) {
+      error.tool = method;
+      error.diagnostic = safeDesktopDiagnostic(error, method);
+      throw error;
+    }
   }
 
   async capabilities() {
-    if (!this.tools) this.tools = (await this.request('tools/list', { threadStartKind: 'all' })).tools;
+    if (!this.tools) {
+      try { this.tools = (await this.request('tools/list', { threadStartKind: 'all' })).tools; }
+      catch (error) {
+        error.tool = 'tools/list';
+        error.diagnostic = safeDesktopDiagnostic(error, 'tools/list');
+        throw error;
+      }
+    }
     const names = this.tools.map(tool => tool.name);
     return {
       usage: names.includes('get_usage_limits') ? 'available' : 'unavailable',

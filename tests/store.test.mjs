@@ -40,6 +40,23 @@ test('新配置默认开启，关闭的全局和目标设置不会被hook登记�
   assert.equal(shouldLaunchWatcher(false, false), true);
 });
 
+test('catalog发现事件持久新增主聊天且不覆盖目标关闭选择或刷新caller pipe', () => {
+  const dir = resolve(dirname(fileURLToPath(import.meta.url)), '../.test-evidence', randomUUID());
+  mkdirSync(dir, { recursive: true });
+  const path = resolve(dir, 'config.jsonl');
+  append(path, { type: 'register', threadId: 'caller', pipe: 'owner-pipe', hostId: 'local', armedAt: 100 });
+  append(path, { type: 'target', threadId: 'closed', value: { enabled: false, armedAt: 90, name: 'kept' } });
+  append(path, { type: 'discover', threadId: 'closed', hostId: 'local', armedAt: 1, name: 'overwritten' });
+  append(path, { type: 'discover', threadId: 'new-chat', hostId: 'local', armedAt: 100, name: 'new' });
+  const config = configuration(path);
+  assert.equal(config.monitoringSince, 100);
+  assert.deepEqual(config.targets.closed, { enabled: false, armedAt: 90, name: 'kept' });
+  assert.deepEqual(config.targets['new-chat'], { enabled: true, armedAt: 100, name: 'new' });
+  assert.equal(config.pipe, 'owner-pipe');
+  assert.equal(config.callerThread, 'caller');
+  assert.equal(config.hostId, 'local');
+});
+
 for (const phase of ['sending', 'uncertain']) {
   test(`旧格式 ${phase} 项迁移后继续占用防重发送槽位`, () => {
     const raw = { pending: { chat: { threadId: 'chat', accountId: 'account-a', hostId: 'host-a',
