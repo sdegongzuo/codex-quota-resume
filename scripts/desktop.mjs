@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { observeRolloutUsage } from './rollout-usage.mjs';
+import { discoverRolloutThreads } from './rollout-catalog.mjs';
 
 const diagnosticMethods = new Set(['tools/list', 'get_usage_limits', 'list_threads', 'read_thread', 'send_message_to_thread']);
 const diagnosticCodes = new Set(['ENOENT', 'ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'EACCES', 'ETIMEDOUT',
@@ -133,6 +134,13 @@ export class Desktop {
       { status: 'unavailable', reason: 'sessions directory unavailable' }]));
     return observeRolloutUsage({ sessionsRoot, targets, nowMs: options.nowMs,
       staleAfterSeconds: options.staleAfterSeconds });
+  }
+
+  async catalogFallback({ monitoringSince, expectedAccountId } = {}) {
+    if (this.hostId && this.hostId !== 'local') return { threads: [] };
+    const codexHome = process.env.CODEX_HOME ?? join(homedir(), '.codex');
+    return { threads: await discoverRolloutThreads({ sessionsRoot: join(codexHome, 'sessions'),
+      monitoringSince, expectedAccountId }) };
   }
 }
 

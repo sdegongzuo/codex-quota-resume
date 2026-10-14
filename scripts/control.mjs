@@ -133,6 +133,7 @@ async function watch() {
           ...(requiredFailure ?? firstTargetFailure ? safeDesktopDiagnostic(requiredFailure ?? firstTargetFailure,
             (requiredFailure ?? firstTargetFailure).method) : {}),
           reason: requiredFailure ? `桌面读取失败：${requiredFailure.method} / ${requiredFailure.code}`
+            + (state.catalogFallbackUsed ? '；已用本地日志收集中断，自动发送暂停' : '')
             : failedTargets.length ? `${failedTargets.length} 个聊天读取失败：${firstTargetFailure.method} / ${firstTargetFailure.code}；其他聊天继续监测` : null };
         append(statePath, state);
       } catch (error) {

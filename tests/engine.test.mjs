@@ -63,6 +63,28 @@ test('tick将白名单原会话的单次input/window观测接入对应压缩状�
 });
 const queued = h => Object.values(h.state.pending).find(item => item.threadId === 'chat');
 
+test('目录超时后从本地元数据发现新聊天并保留中断，仍禁止发送', async () => {
+  const h = harness();
+  h.config.monitoringSince = 100;
+  h.config.targets = {};
+  h.usage = quota(true, 0);
+  const call = h.desktop.call;
+  h.desktop.call = async (method, args) => {
+    if (method === 'list_threads') throw Object.assign(Error('timeout'), { code: 'DESKTOP_TIMEOUT' });
+    return call(method, args);
+  };
+  h.desktop.catalogFallback = async options => {
+    assert.equal(options.monitoringSince, 100);
+    assert.equal(options.expectedAccountId, 'account-a');
+    return { threads: [{ id: 'chat', kind: 'codex', hostId: 'local', source: 'local_rollout_metadata' }] };
+  };
+  await h.run(150);
+  assert.equal(h.config.targets.chat.enabled, true);
+  assert.equal(queued(h).phase, 'needs_review');
+  assert.equal(h.state.catalogFallbackUsed, true);
+  assert.equal(h.sends.length, 0);
+});
+
 test('desktop quota error without codexErrorInfo is collected only with exhausted five-hour evidence', async () => {
   const h = harness();
   h.snapshot.thread.status.type = 'systemError';

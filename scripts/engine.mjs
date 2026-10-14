@@ -114,12 +114,6 @@ export async function tick({ desktop, config, state, now, persist, log, stillEna
     await persist();
   }
   const hostId = config.hostId ?? 'local';
-  const catalogThreads = catalog
-    ? [...(catalog.threads ?? []), ...(catalog.pinnedThreads ?? [])] : [];
-  const primary = new Map(catalogThreads.filter(thread => typeof thread?.id === 'string' && thread.id
-    && primaryCatalogChat(thread, hostId))
-    .map(thread => [thread.id, thread]));
-  const visible = new Set(primary.keys());
 
   let usage = null;
   try {
@@ -141,6 +135,28 @@ export async function tick({ desktop, config, state, now, persist, log, stillEna
     state.usageReadFailure = { ...safeDesktopDiagnostic(error, 'get_usage_limits'), observedAt: now };
     await persist();
   }
+
+  let fallback = null;
+  state.catalogFallbackUsed = false;
+  if (!catalog && typeof desktop.catalogFallback === 'function') {
+    try {
+      fallback = await desktop.catalogFallback({ monitoringSince: state.monitoringSince,
+        expectedAccountId: usage?.accountId });
+      state.catalogFallbackUsed = true;
+      delete state.catalogFallbackFailure;
+      await persist();
+    } catch (error) {
+      state.catalogFallbackFailure = { method: 'local_rollout_catalog',
+        code: safeDesktopDiagnostic(error).code, observedAt: now };
+      await persist();
+    }
+  }
+  const catalogThreads = catalog
+    ? [...(catalog.threads ?? []), ...(catalog.pinnedThreads ?? [])] : fallback?.threads ?? [];
+  const primary = new Map(catalogThreads.filter(thread => typeof thread?.id === 'string' && thread.id
+    && primaryCatalogChat(thread, hostId))
+    .map(thread => [thread.id, thread]));
+  const visible = new Set(primary.keys());
 
   config.targets ??= {};
   for (const thread of primary.values()) {
