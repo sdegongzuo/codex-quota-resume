@@ -1,6 +1,7 @@
 import { observeCompaction } from './compaction.mjs';
 import { safeDesktopDiagnostic } from './desktop.mjs';
 import { taskId } from './store.mjs';
+import { quotaSnapshot } from './quota-view.mjs';
 
 export const CONTINUE_PROMPT = '继续完成本聊天中尚未完成的用户任务，遵守已有约束和授权。如果任务已经完成，或需要用户回答、确认或提供信息，请说明并停止，不要另起任务。';
 
@@ -91,7 +92,16 @@ function retainQuotaObservations(history) {
 // persist 必须完成后才能发送；结果不确定时保留 sending，绝不自动重发。
 export async function tick({ desktop, config, state, now, persist, log, stillEnabled = () => true,
   acknowledgeManualResolution = async () => {}, registerTarget }) {
-  if (!config.enabled) return;
+  if (!config.enabled) {
+    try {
+      state.quotaDisplay = quotaSnapshot(await desktop.call('get_usage_limits'), now);
+      delete state.usageReadFailure;
+    } catch (error) {
+      state.usageReadFailure = { ...safeDesktopDiagnostic(error, 'get_usage_limits'), observedAt: now };
+    }
+    await persist();
+    return;
+  }
   state.pending ??= {};
   state.handled ??= [];
   state.discoveredTargets ??= {};
@@ -120,6 +130,8 @@ export async function tick({ desktop, config, state, now, persist, log, stillEna
   try {
     usage = await desktop.call('get_usage_limits');
     delete state.usageReadFailure;
+    state.quotaDisplay = quotaSnapshot(usage, now);
+    await persist();
     if (typeof usage?.accountId === 'string' && usage.accountId) {
       const history = state.quotaObservationsByAccount[usage.accountId] ??= [];
       const resetAt = exhaustedUntil(usage);
@@ -139,11 +151,11 @@ export async function tick({ desktop, config, state, now, persist, log, stillEna
 
   let fallback = null;
   state.catalogFallbackUsed = false;
-  if (!catalog && typeof desktop.catalogFallback === 'function') {
+  if (typeof desktop.catalogFallback === 'function') {
     try {
       fallback = await desktop.catalogFallback({ monitoringSince: state.monitoringSince,
         expectedAccountId: usage?.accountId });
-      state.catalogFallbackUsed = true;
+      state.catalogFallbackUsed = !catalog;
       delete state.catalogFallbackFailure;
       await persist();
     } catch (error) {
@@ -154,10 +166,10 @@ export async function tick({ desktop, config, state, now, persist, log, stillEna
   }
   const catalogThreads = catalog
     ? [...(catalog.threads ?? []), ...(catalog.pinnedThreads ?? [])] : fallback?.threads ?? [];
-  const primary = new Map(catalogThreads.filter(thread => typeof thread?.id === 'string' && thread.id
+  const visible = new Set(catalogThreads.filter(thread => primaryCatalogChat(thread, hostId)).map(thread => thread.id));
+  const primary = new Map([...(fallback?.threads ?? []), ...catalogThreads].filter(thread => typeof thread?.id === 'string' && thread.id
     && primaryCatalogChat(thread, hostId))
     .map(thread => [thread.id, thread]));
-  const visible = new Set(primary.keys());
 
   config.targets ??= {};
   for (const thread of primary.values()) {
@@ -207,7 +219,7 @@ export async function tick({ desktop, config, state, now, persist, log, stillEna
     }
   };
   for (const [threadId, target] of Object.entries(config.targets)) {
-    if (target.enabled === false || (catalog && !visible.has(threadId))) continue;
+    if (target.enabled === false) continue;
     const snapshot = await readTarget(threadId);
     if (!snapshot || snapshot.thread?.kind !== 'codex'
       || (snapshot.thread.hostId && snapshot.thread.hostId !== hostId)

@@ -104,7 +104,6 @@ async function watch() {
   try {
     while (!stopRequested) {
       const config = configuration(configPath);
-      if (!config.enabled) break;
       try {
           await tick({ desktop: new Desktop({ ...config, native: await nativeBridge(config) }), config, state, now: now(),
           persist: () => append(statePath, state), log,
@@ -162,7 +161,7 @@ if (command === 'enable') {
 } else if (command === 'disable') {
   append(configPath, { type: 'disable' });
   log('disabled');
-  console.log('已关闭自动继续；后台程序会在下一轮检查时自行退出。');
+  console.log('已关闭自动继续；后台保留只读额度监测，stop 可停止后台。');
 } else if (command === 'stop') {
   const runtime = load(runtimePath, null);
   if (!runtime?.alive || !Number.isInteger(runtime.port)) {
@@ -213,6 +212,8 @@ if (command === 'enable') {
       recoveryRetrySeconds: settings.recoveryRetrySeconds ?? config.recoveryRetrySeconds,
       intervalSeconds: settings.intervalSeconds ?? config.intervalSeconds }, null, 2));
 } else if (command === 'panel') {
+  // The panel needs quota observations even when automatic actions are disabled.
+  launchWatcher();
   const initialNative = await nativeBridge(configuration(configPath));
   const nativeVerified = initialNative?.verified === true;
   const compactionVerified = initialNative?.compactionVerified === true;

@@ -63,6 +63,61 @@ test('tick将白名单原会话的单次input/window观测接入对应压缩状�
 });
 const queued = h => Object.values(h.state.pending).find(item => item.threadId === 'chat');
 
+test('关闭自动续跑仅采集额度，不发现聊天、不压缩、不发送', async () => {
+  const h = harness();
+  h.config.enabled = false;
+  h.desktop.call = async method => {
+    assert.equal(method, 'get_usage_limits');
+    return quota(true, 64);
+  };
+  await h.run(120);
+  assert.equal(h.state.quotaDisplay.windows[0].remainingPercent, 36);
+  assert.equal(h.writes.at(-1).quotaDisplay.observedAt, 120);
+  assert.deepEqual(h.state.pending, {});
+  h.desktop.call = async () => { throw Object.assign(Error('offline'), { code: 'DESKTOP_TIMEOUT' }); };
+  await h.run(150);
+  assert.equal(h.state.quotaDisplay.observedAt, 120);
+  assert.equal(h.state.usageReadFailure.code, 'DESKTOP_TIMEOUT');
+});
+
+test('目录外已登记聊天仍收集额度失败，但不能自动发送', async () => {
+  const h = harness();
+  h.visible = false;
+  await h.run(120);
+  assert.ok(queued(h));
+  assert.equal(queued(h).resetAt, 200);
+  h.usage = quota(true, 0);
+  await h.run(321);
+  assert.equal(h.sends.length, 0);
+});
+
+test('官方目录正常时也从本机元数据补充发现旧聊天', async () => {
+  const h = harness();
+  h.visible = false;
+  h.config.targets = {};
+  h.config.monitoringSince = 100;
+  h.desktop.catalogFallback = async () => ({ threads: [{ id: 'chat', kind: 'codex', hostId: 'local' }] });
+  await h.run(120);
+  assert.ok(h.state.discoveredTargets.chat);
+  assert.ok(queued(h));
+  assert.equal(h.state.catalogFallbackUsed, false);
+  assert.equal(h.sends.length, 0);
+});
+
+test('历史投影保留同一会话每次中断，默认投影仍只返回一张卡片', () => {
+  const pending = {
+    old: { accountId: 'a', threadId: 'chat', turnId: 'old', phase: 'stopped', interruptedAt: 1 },
+    latest: { accountId: 'a', threadId: 'chat', turnId: 'new', phase: 'waiting', interruptedAt: 2 },
+  };
+  const config = { targets: {}, items: {} };
+  assert.equal(projectQueue(pending, config, null).length, 1);
+  const history = projectQueue(pending, config, null, true);
+  assert.equal(history.length, 2);
+  assert.deepEqual(history.map(item => item.phase), ['stopped', 'waiting']);
+  assert.deepEqual(history.map(item => item.isLatest), [false, true]);
+  assert.equal(JSON.stringify(history).includes('accountId'), false);
+});
+
 test('目录超时后从本地元数据发现新聊天并保留中断，仍禁止发送', async () => {
   const h = harness();
   h.config.monitoringSince = 100;
@@ -451,6 +506,7 @@ test('本机面板聚合同会话历史、脱敏状态、拒绝坏请求并只�
     assert.equal(state.contextUsage[0].compactionStatus, 'unsupported');
     assert.ok(!JSON.stringify(state).includes('source'));
     assert.equal(state.items.length, 2);
+    assert.equal(state.historyItems.length, 3);
     const grouped = state.items.find(item => item.threadId === 'chat-private');
     assert.equal(grouped.historyCount, 2);
     assert.equal(grouped.phase, 'uncertain');

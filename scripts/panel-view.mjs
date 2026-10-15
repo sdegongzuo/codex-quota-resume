@@ -5,6 +5,7 @@ export function renderPanel(token, canStop) {
 </style></head><body><main>
 <header class="heading"><h1>五小时额度恢复队列</h1><button id="refresh">刷新</button></header>
 <div id="notice" role="status" aria-live="polite"></div>
+<section class="section" aria-labelledby="quota-title"><div class="toolbar"><h2 id="quota-title">剩余额度</h2><span id="quota-status" class="count">尚未读取</span></div><div class="table-scroll"><table><thead><tr><th>额度窗口</th><th>剩余比例</th><th>恢复时间（北京时间）</th></tr></thead><tbody id="quota-rows"></tbody></table></div></section>
 <section class="section" aria-labelledby="queue-title"><div class="toolbar"><h2 id="queue-title">待续跑任务</h2><span id="queue-count" class="count"></span></div><div class="table-scroll"><table><thead><tr><th>会话</th><th>中断时间</th><th>预计续跑</th><th>状态</th><th>自动续跑</th><th>操作</th></tr></thead><tbody id="items"></tbody></table></div></section>
 <section class="section" id="contextUsage" aria-labelledby="context-title"><div class="toolbar"><h2 id="context-title">已监测会话的上下文</h2><label>显示 <select id="session-filter"><option value="all">全部会话</option><option value="running">正在运行</option></select></label><span id="context-count" class="count"></span></div><div class="table-scroll"><table><thead><tr><th>会话</th><th>运行状态</th><th>上下文用量</th><th>占比</th><th>数据更新时间</th><th>压缩状态</th><th>操作</th></tr></thead><tbody id="contextUsageRows"></tbody></table></div></section>
 <section class="section settings"><details><summary>设置与后台状态</summary><div class="toolbar"><b>总开关</b><button id="global">正在读取…</button><label>压缩阈值 <input id="threshold" type="number" min="10" max="90" step="5">%</label><button id="save">保存阈值</button></div><div id="settings" class="muted"></div><div id="connection" class="health">尚未确认后台状态</div><div id="cap" class="warning"></div></details></section>
@@ -43,6 +44,7 @@ function panelClient(token, canStop) {
   const button = (label, action) => {
     const element = node('button', label);
     element.type = 'button';
+    if (label === '停止任务并关闭自动续跑') element.title = '立即停止正在运行的任务，并关闭该会话自动续跑';
     element.onclick = async () => {
       element.disabled = true;
       try { $('notice').textContent = ''; await action(); await refresh(); }
@@ -56,9 +58,13 @@ function panelClient(token, canStop) {
   }
   function renderQueue(state) {
     const body = $('items'); body.replaceChildren();
-    $('queue-count').textContent = state.items.length + ' 项';
-    if (!state.items.length) { empty(body, 6, '还没有额度中断记录'); return; }
-    for (const item of state.items) {
+    const terminal = new Set(['turn_completed', 'stopped', 'superseded']);
+    const history = state.historyItems || state.items;
+    const items = $('show-history').checked ? history : state.items.filter(item => !terminal.has(item.phase));
+    const historyCount = history.filter(item => terminal.has(item.phase)).length;
+    $('queue-count').textContent = items.length + ' 项' + (historyCount ? ' · 历史 ' + historyCount + ' 项' : '');
+    if (!items.length) { empty(body, 6, $('show-history').checked ? '还没有额度中断记录' : '当前没有待续跑任务'); return; }
+    for (const item of items) {
       const row = node('tr');
       const name = cell(row, undefined, 'name'); name.append(node('b', item.name || item.threadId));
       if (item.historyCount > 1) name.append(node('div', '历史中断 ' + item.historyCount + ' 次', 'muted'));
@@ -74,9 +80,9 @@ function panelClient(token, canStop) {
       if (['sending', 'uncertain'].includes(item.phase)) {
         const resolve = button(item.manualResolutionRequested ? '等待后台核对' : '核对后解除等待', () => api('/api/resolve', { id: item.id }));
         resolve.disabled = item.manualResolutionRequested;
-        resolve.title = '先打开原会话确认没有运行中的轮次，再请求核对；不会重发消息'; actions.append(resolve);
+        resolve.title = '核对原会话后解除等待：先确认没有运行中的轮次，再请求核对；不会重发消息'; actions.append(resolve);
       }
-      if (canStop && item.canStop && item.runningTurnId) actions.append(button('停止并关闭续跑', async () => {
+      if (canStop && item.canStop && item.runningTurnId) actions.append(button('停止任务并关闭自动续跑', async () => {
         const result = await api('/api/stop', { id: item.id, turnId: item.runningTurnId });
         if (!['completed', 'already_ended'].includes(result.operation?.status)) $('notice').textContent = '停止结果待核对，请打开原会话确认';
       }));
@@ -110,6 +116,18 @@ function panelClient(token, canStop) {
     loading = true;
     try {
       current = await api('/api/state'); renderQueue(current); renderContext();
+      const quota = current.quota || { status: 'unconfirmed', windows: [] };
+      const quotaLabels = { available: '读取成功', unavailable: '读取失败 · 上次数据仅供参考', stale: '数据已过期', unconfirmed: '尚未读取', no_data: '额度数据不可用' };
+      $('quota-status').textContent = (quotaLabels[quota.status] || '状态未知') + ' · 更新于 ' + time(quota.observedAt);
+      const quotaRows = $('quota-rows'); quotaRows.replaceChildren();
+      if (!quota.windows.length) empty(quotaRows, 3, '暂无官方额度数据，等待后台读取');
+      for (const window of quota.windows) {
+        const row = node('tr');
+        cell(row, (window.windowDurationMins === 300 ? '5 小时' : '1 周') + (new Set(quota.windows.map(item => item.bucket)).size > 1 ? ' · ' + window.bucket : ''));
+        cell(row, Number.isFinite(window.remainingPercent) ? window.remainingPercent + '%' : '未知');
+        cell(row, Number.isFinite(window.resetsAt) ? new Date(window.resetsAt * 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) : '未知');
+        quotaRows.append(row);
+      }
       $('global').textContent = current.config.enabled ? '已开启（点击关闭）' : '已关闭（点击开启）';
       const input = $('threshold'); if (document.activeElement !== input) input.value = Math.round(current.config.compactionThresholdRatio * 100);
       $('settings').textContent = '恢复缓冲 ' + current.config.resumeBufferSeconds + ' 秒；重查 ' + current.config.recoveryRetrySeconds + ' 秒；页面每 30 秒刷新';
@@ -120,6 +138,11 @@ function panelClient(token, canStop) {
     } catch (error) { $('notice').textContent = '页面读取失败：' + error.message; }
     finally { loading = false; }
   }
+  const historyLabel = node('label');
+  const historyToggle = node('input'); historyToggle.type = 'checkbox'; historyToggle.id = 'show-history'; historyToggle.style.width = 'auto';
+  historyLabel.append(historyToggle, document.createTextNode('显示历史'));
+  $('queue-count').before(historyLabel);
+  historyToggle.onchange = () => { if (current) renderQueue(current); };
   $('session-filter').onchange = renderContext;
   $('refresh').onclick = () => { $('notice').textContent = ''; refresh(); };
   $('global').onclick = async () => { if (!current) return; try { await api('/api/global', { enabled: !current.config.enabled }); refresh(); } catch (error) { $('notice').textContent = error.message; } };

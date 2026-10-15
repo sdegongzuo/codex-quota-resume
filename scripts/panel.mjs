@@ -3,6 +3,7 @@ import { renderPanel } from './panel-view.mjs';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { records, append, configuration, taskId } from './store.mjs';
 import { safeDesktopDiagnostic } from './desktop.mjs';
+import { panelQuota } from './quota-view.mjs';
 
 export function panelConnection(connection, now = Date.now() / 1000) {
   if (!connection) return { status: 'unconfirmed', observedAt: null, reason: null };
@@ -12,7 +13,7 @@ export function panelConnection(connection, now = Date.now() / 1000) {
     ...(connection.method ? safeDesktopDiagnostic(connection, connection.method) : {}) };
 }
 
-export function projectQueue(pending, config, activeAutoResume) {
+export function projectQueue(pending, config, activeAutoResume, includeHistory = false) {
   const groups = new Map();
   for (const item of Object.values(pending ?? {})) {
     const key = JSON.stringify([item.accountId ?? 'unknown-account', item.hostId ?? 'local', item.threadId]);
@@ -30,7 +31,12 @@ export function projectQueue(pending, config, activeAutoResume) {
       newestId: newest ? safeId : previous.newestId,
       selectedIsLatest: chooseItem ? newest : (newest ? false : previous.selectedIsLatest) });
   }
-  return [...groups.values()].map(({ item, historyCount, selectedIsLatest }) => {
+  const selected = includeHistory
+    ? Object.values(pending ?? {}).map(item => ({ item, historyCount: 1,
+      selectedIsLatest: groups.get(JSON.stringify([item.accountId ?? 'unknown-account', item.hostId ?? 'local', item.threadId]))?.newestId
+        === taskId(item.accountId, item.hostId, item.threadId, item.turnId) }))
+    : [...groups.values()];
+  return selected.map(({ item, historyCount, selectedIsLatest }) => {
     const id = taskId(item.accountId, item.hostId, item.threadId, item.turnId);
     const itemConfig = config.items?.[id] ?? config.items?.[item.id] ?? config.items?.[item.legacyId] ?? {};
     return {
@@ -80,6 +86,7 @@ export function startPanel({ host = '127.0.0.1', port = 0, accessToken, configPa
     if (request.method === 'GET' && request.url === '/api/state') {
       const state = records(statePath).at(-1) ?? { pending: {} };
       const items = projectQueue(state.pending, config, state.activeAutoResume);
+      const historyItems = projectQueue(state.pending, config, state.activeAutoResume, true);
       const connection = panelConnection(state.connection);
       const safeConfig = { enabled: config.enabled, compactionThresholdRatio: config.compactionThresholdRatio,
         resumeBufferSeconds: config.resumeBufferSeconds, recoveryRetrySeconds: config.recoveryRetrySeconds };
@@ -114,7 +121,7 @@ export function startPanel({ host = '127.0.0.1', port = 0, accessToken, configPa
         uncertain: '压缩结果待核对', quota_unavailable: '额度许可未确认',
         connected_unverified: '桥接已认证，真实效果尚未验收',
         above_threshold_after_compaction: '压缩后仍高于阈值' };
-      return json(response, 200, { config: safeConfig, items, connection, capabilities, contextUsage,
+      return json(response, 200, { config: safeConfig, items, historyItems, connection, capabilities, contextUsage, quota: panelQuota(state),
         compaction: { ...compaction, status: compactionLabels[compaction.status] ?? compaction.status } });
     }
     if (request.method !== 'POST') return json(response, 404, { error: 'not found' });
