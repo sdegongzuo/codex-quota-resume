@@ -97,6 +97,7 @@ export async function tick({ desktop, config, state, now, persist, log, stillEna
   state.discoveredTargets ??= {};
   state.quotaObservationsByAccount ??= {};
   state.readFailuresByTarget ??= {};
+  state.activityByTarget ??= {};
   const armedTimes = Object.values(config.targets ?? {}).map(target => target.armedAt).filter(Number.isFinite);
   const baseline = Number.isFinite(config.monitoringSince) ? config.monitoringSince
     : armedTimes.length ? Math.min(...armedTimes)
@@ -193,9 +194,14 @@ export async function tick({ desktop, config, state, now, persist, log, stillEna
         hostId: config.targets[threadId]?.hostId ?? hostId, turnLimit: 1, includeOutputs: false });
       delete state.readFailuresByTarget[threadId];
       snapshots.set(threadId, snapshot);
+      const threadType = snapshot.thread?.status?.type;
+      state.activityByTarget[threadId] = { status: threadType === 'notLoaded' ? 'not_loaded'
+        : statusOf(snapshot) ?? (threadType === 'idle' ? 'idle' : 'unknown'),
+        observedAt: now, name: snapshot.thread?.title ?? config.targets[threadId]?.name ?? threadId };
       return snapshot;
     } catch (error) {
       state.readFailuresByTarget[threadId] = { ...safeDesktopDiagnostic(error, 'read_thread'), observedAt: now };
+      state.activityByTarget[threadId] = { status: 'unknown', observedAt: now };
       await persist();
       return null;
     }

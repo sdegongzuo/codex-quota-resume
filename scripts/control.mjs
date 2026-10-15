@@ -226,7 +226,9 @@ if (command === 'enable') {
         ? '原生桥接及压缩关联协议已接入，真实压缩和中止效果等待自然额度周期验收。'
         : '原生桥接可读取轮次元数据；当前 host 未加载新版压缩关联协议，自动压缩暂不可用。额度恢复续跑独立运行。')
       : '已监测会话可读取单次上下文用量；当前没有通过认证的原生桥接，压缩与中止不可用，后端轮次元数据尚未接入。' };
-  const panel = startPanel({ configPath, statePath, capabilities, onGlobalEnabled: async () => launchWatcher(),
+  const panel = startPanel({ configPath, statePath, capabilities,
+      port: Number(option('--port') ?? 0), accessToken: process.env.CODEX_QUOTA_RESUME_PANEL_TOKEN,
+      onGlobalEnabled: async () => launchWatcher(),
       onStop: nativeVerified ? async operation => {
         const native = await nativeBridge(configuration(configPath));
         if (!native) return { status: 'connection_unavailable' };
