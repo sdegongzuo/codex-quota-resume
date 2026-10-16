@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { observeRolloutUsage } from './rollout-usage.mjs';
 import { discoverRolloutThreads } from './rollout-catalog.mjs';
 
-const diagnosticMethods = new Set(['tools/list', 'get_usage_limits', 'list_threads', 'read_thread', 'send_message_to_thread']);
+const diagnosticMethods = new Set(['tools/list', 'get_usage_limits', 'list_threads', 'read_thread', 'send_message_to_thread', 'goal_get', 'goal_resume']);
 const diagnosticCodes = new Set(['ENOENT', 'ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'EACCES', 'ETIMEDOUT',
   'DESKTOP_TIMEOUT', 'DESKTOP_DISCONNECTED', 'DESKTOP_INVALID_RESPONSE', 'DESKTOP_RPC_ERROR',
   'DESKTOP_TOOL_FAILED', 'DESKTOP_TOOL_UNAVAILABLE', 'RPC_ERROR']);
@@ -31,6 +31,29 @@ export class Desktop {
   async nativeSnapshot(threadId) {
     if (this.native?.verified !== true) return null;
     return this.native.snapshot(threadId);
+  }
+
+  async getTargetGoal(threadId) {
+    if (this.native?.verified !== true || this.native.goalControlVerified !== true) {
+      throw rpcError('DESKTOP_TOOL_UNAVAILABLE', '原生目标控制未接通');
+    }
+    const result = await this.native.getGoal(threadId);
+    if (!Object.hasOwn(result ?? {}, 'goal') || (result.goal !== null
+      && (result.goal?.threadId !== threadId || typeof result.goal.status !== 'string'))) {
+      throw rpcError('DESKTOP_INVALID_RESPONSE', '目标查询结果无效');
+    }
+    return result.goal;
+  }
+
+  async resumeTargetGoal(threadId, turnId) {
+    if (this.native?.verified !== true || this.native.goalControlVerified !== true) {
+      throw rpcError('DESKTOP_TOOL_UNAVAILABLE', '原生目标控制未接通');
+    }
+    const result = await this.native.resumeGoal(threadId, turnId);
+    if (result?.goal?.threadId !== threadId || result.goal.status !== 'active') {
+      throw rpcError('DESKTOP_INVALID_RESPONSE', '目标继续结果未确认');
+    }
+    return result;
   }
 
   compactionAdapterForTarget(threadId, turnId) {
@@ -121,6 +144,7 @@ export class Desktop {
       activeContextUsage: 'available',
       contextUsageSource: 'rollout_jsonl_read_only',
       compaction: 'unsupported',
+      goalControl: this.native?.verified === true && this.native.goalControlVerified === true ? 'available' : 'unavailable',
       liveTurnEvents: 'unsupported',
       discoveredTools: names,
       limitation: '活动用量只读自白名单会话 rollout 的单次 usage 与 model_context_window；压缩及实时 turn 事件仍不支持。',

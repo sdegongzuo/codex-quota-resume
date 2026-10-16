@@ -3,7 +3,7 @@ import { safeDesktopDiagnostic } from './desktop.mjs';
 import { taskId } from './store.mjs';
 import { quotaSnapshot } from './quota-view.mjs';
 
-export const CONTINUE_PROMPT = '继续完成本聊天中尚未完成的用户任务，遵守已有约束和授权。如果任务已经完成，或需要用户回答、确认或提供信息，请说明并停止，不要另起任务。';
+export const CONTINUE_PROMPT = '继续完成';
 
 export function exhaustedUntil(usage) {
   const buckets = Object.values(usage.rateLimitsByLimitId ?? { legacy: usage.rateLimits });
@@ -535,17 +535,39 @@ export async function tick({ desktop, config, state, now, persist, log, stillEna
     pending.nextCheckAt = now + (config.recoveryRetrySeconds ?? 60);
     await persist(); return;
   }
+  let goal;
+  try {
+    goal = await desktop.getTargetGoal(pending.threadId);
+    if (goal !== null && (goal?.threadId !== pending.threadId
+      || !['active', 'paused', 'blocked', 'usageLimited', 'budgetLimited', 'complete'].includes(goal.status))) {
+      throw Error('Invalid goal response');
+    }
+  } catch {
+    pending.reason = '无法确认原会话目标，等待目标接口恢复';
+    pending.nextCheckAt = now + (config.recoveryRetrySeconds ?? 60);
+    await persist(); return;
+  }
+  if (goal?.status === 'complete' || goal?.status === 'budgetLimited') {
+    pending.phase = goal.status === 'complete' ? 'turn_completed' : 'needs_user';
+    pending.reason = goal.status === 'complete' ? '原会话目标已完成' : '目标预算已用完，需要用户调整';
+    await persist(); return;
+  }
+  pending.resumeMethod = goal === null ? 'prompt' : 'goal';
   pending.phase = 'sending'; pending.claimedAt = now;
   state.activeAutoResume = pending.id;
   await persist();
   await log('sending', { threadId: pending.threadId, turnId: pending.turnId });
   try {
-    await desktop.call('send_message_to_thread', { threadId: pending.threadId,
-      hostId: config.hostId, prompt: CONTINUE_PROMPT });
+    if (pending.resumeMethod === 'goal') {
+      await desktop.resumeTargetGoal(pending.threadId, pending.turnId);
+    } else {
+      await desktop.call('send_message_to_thread', { threadId: pending.threadId,
+        hostId: config.hostId, prompt: CONTINUE_PROMPT });
+    }
     pending.phase = 'sent'; pending.sentAt = now;
     await persist(); await log('sent', { threadId: pending.threadId, turnId: pending.turnId });
   } catch (error) {
-    pending.phase = 'uncertain'; pending.reason = '发送结果未确认，已停止自动重发';
+    pending.phase = 'uncertain'; pending.reason = '续跑结果未确认，已停止自动重试';
     await persist(); await log('uncertain', { threadId: pending.threadId, reason: pending.reason });
     throw error;
   }

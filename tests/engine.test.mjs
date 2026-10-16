@@ -20,7 +20,7 @@ function harness() {
     acknowledgements: [],
     config: { enabled: true, targets: { chat: { enabled: true, armedAt: 100 } } },
     state: { pending: {}, handled: [] }, visible: true, still: true };
-  h.desktop = { call: async (name, args) => {
+  h.desktop = { getTargetGoal: async () => null, call: async (name, args) => {
     if (name === 'list_threads') return { threads: h.visible ? [{ id: 'chat', kind: 'codex' }] : [] };
     if (name === 'get_usage_limits') return h.usage;
     if (name === 'read_thread') return h.snapshot;
@@ -62,6 +62,55 @@ test('tick将白名单原会话的单次input/window观测接入对应压缩状�
   assert.equal(state.compactionByTarget[threadId].status, 'unsupported');
 });
 const queued = h => Object.values(h.state.pending).find(item => item.threadId === 'chat');
+
+for (const status of ['paused', 'usageLimited', 'blocked', 'active']) {
+  test(`有${status}目标时只恢复原目标，不发送prompt`, async () => {
+    const h = harness(), resumed = [];
+    h.desktop.getTargetGoal = async () => ({ threadId: 'chat', status });
+    h.desktop.resumeTargetGoal = async (...args) => {
+      assert.equal(queued(h).phase, 'sending');
+      assert.equal(h.writes.at(-1).pending[queued(h).id].phase, 'sending');
+      resumed.push(args);
+    };
+    await h.run(150); h.usage = quota(true, 0);
+    await h.run(320); await h.run(350);
+    assert.deepEqual(resumed, [['chat', 'failed-turn']]);
+    assert.equal(h.sends.length, 0);
+    assert.equal(queued(h).resumeMethod, 'goal');
+  });
+}
+
+test('目标查询失败或结果无效不能降级发prompt', async () => {
+  for (const result of [undefined, {}, { threadId: 'other', status: 'paused' }]) {
+    const h = harness(); h.desktop.getTargetGoal = async () => result;
+    await h.run(150); h.usage = quota(true, 0); await h.run(320);
+    assert.equal(h.sends.length, 0); assert.equal(queued(h).phase, 'waiting');
+  }
+  const h = harness(); h.desktop.getTargetGoal = async () => { throw Error('offline'); };
+  await h.run(150); h.usage = quota(true, 0); await h.run(320);
+  assert.equal(h.sends.length, 0); assert.equal(h.state.activeAutoResume ?? null, null);
+});
+
+test('目标恢复结果不确定时保留槽位，不重试也不补发prompt', async () => {
+  const h = harness(); let attempts = 0;
+  h.desktop.getTargetGoal = async () => ({ threadId: 'chat', status: 'paused' });
+  h.desktop.resumeTargetGoal = async () => { attempts++; throw Error('timeout'); };
+  await h.run(150); h.usage = quota(true, 0); await assert.rejects(h.run(320));
+  await h.run(400);
+  assert.equal(attempts, 1); assert.equal(h.sends.length, 0);
+  assert.equal(queued(h).phase, 'uncertain');
+});
+
+for (const status of ['complete', 'budgetLimited']) {
+  test(`${status}目标不恢复也不发送prompt`, async () => {
+    const h = harness();
+    h.desktop.getTargetGoal = async () => ({ threadId: 'chat', status });
+    h.desktop.resumeTargetGoal = async () => assert.fail('不应恢复');
+    await h.run(150); h.usage = quota(true, 0); await h.run(320);
+    assert.equal(h.sends.length, 0);
+    assert.equal(queued(h).phase, status === 'complete' ? 'turn_completed' : 'needs_user');
+  });
+}
 
 test('关闭自动续跑仅采集额度，不发现聊天、不压缩、不发送', async () => {
   const h = harness();
@@ -588,7 +637,7 @@ test('额度中断先等待，恢复且到点后只发送一次到原聊天', as
   await h.run(350);
   assert.equal(h.sends.length, 1);
   assert.equal(h.sends[0].threadId, 'chat');
-  assert.match(h.sends[0].prompt, /尚未完成/);
+  assert.equal(h.sends[0].prompt, '继续完成');
 });
 
 for (const allowed of [false, null, undefined]) {

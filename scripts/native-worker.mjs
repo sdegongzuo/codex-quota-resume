@@ -13,7 +13,10 @@ export async function connectNativeWorker({ descriptor, targets, persist, histor
     ordinaryUsageAllowed, request: (method, params, context) => client.command(
       method === 'thread/compact/start' ? 'compact' : 'interrupt', params.threadId, context.turnId) });
   operations.restore(history ?? []);
-  return { verified: true, compactionVerified, snapshot: id => client.command('snapshot', id),
+  return { verified: true, compactionVerified, goalControlVerified: handshake?.goalControl === true,
+    getGoal: id => client.command('goal_get', id),
+    resumeGoal: (id, turnId) => client.command('goal_resume', id, turnId),
+    snapshot: id => client.command('snapshot', id),
     perform: operation => operation.action === 'compact' && !compactionVerified
       ? Promise.resolve({ status: 'unsupported_protocol' }) : operations.perform(operation) };
 }

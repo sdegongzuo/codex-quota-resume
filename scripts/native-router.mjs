@@ -23,7 +23,7 @@ export class NativeRouter {
 
   bridgeRequest(message, destination, authorize) {
     if (this.closed) throw new Error('native router closed');
-    if (!Object.hasOwn(message, 'id') || !['thread/compact/start', 'turn/interrupt'].includes(message.method)) {
+    if (!Object.hasOwn(message, 'id') || !['thread/compact/start', 'turn/interrupt', 'thread/goal/get', 'thread/goal/set'].includes(message.method)) {
       throw new Error('native method not allowed');
     }
     const params = message.params;
@@ -31,7 +31,11 @@ export class NativeRouter {
       || (message.method === 'turn/interrupt' && (typeof params.turnId !== 'string' || !params.turnId))) {
       throw new Error('native target missing');
     }
-    const allowedKeys = message.method === 'turn/interrupt' ? ['threadId', 'turnId'] : ['threadId'];
+    const allowedKeys = message.method === 'thread/goal/set' ? ['threadId', 'status', 'origin']
+      : message.method === 'turn/interrupt' ? ['threadId', 'turnId'] : ['threadId'];
+    if (message.method === 'thread/goal/set' && (params.status !== 'active' || params.origin !== 'user')) {
+      throw new Error('native goal mutation not allowed');
+    }
     if (Object.keys(params).some(key => !allowedKeys.includes(key))) throw new Error('native parameters not allowed');
     if (authorize(message) !== true) throw new Error('native target not authorized');
     const id = `quota-router-${++this.sequence}`;

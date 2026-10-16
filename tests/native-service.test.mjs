@@ -14,6 +14,46 @@ const setup = () => {
 };
 const command = { id: 1, token, command: 'compact', threadId: 'allowed', turnId: 't1' };
 
+test('目标通过真实路由核心查询及切换active，响应不包含目标正文', async () => {
+  const { NativeRouter } = await import('../scripts/native-router.mjs');
+  let goal = { threadId: 'allowed', status: 'paused', objective: 'private objective' };
+  let config = { enabled: true, targets: { allowed: { enabled: true } } };
+  let snapshot = { turnId: 'failed', status: 'failed' };
+  const sent = [], replies = [];
+  let router;
+  router = new NativeRouter({ renderer: () => {}, backend: message => {
+    sent.push(message);
+    if (message.method === 'thread/goal/set') goal = { ...goal, status: message.params.status };
+    router.backendMessage({ id: message.id, result: { goal } });
+  } });
+  const service = new NativeService({ token, router, events: { snapshot: () => snapshot },
+    configuration: () => config, ordinaryUsageAllowed: async () => true });
+  const message = { id: 20, token, command: 'goal_get', threadId: 'allowed' };
+  await service.dispatch(message, r => replies.push(r));
+  assert.deepEqual(replies.at(-1).result, { goal: { threadId: 'allowed', status: 'paused' } });
+  await service.dispatch({ ...message, command: 'goal_resume', turnId: 'failed' }, r => replies.push(r));
+  assert.equal(replies.at(-1).result.goal.status, 'active');
+  assert.deepEqual(sent.at(-1).params, { threadId: 'allowed', status: 'active', origin: 'user' });
+  for (const status of ['budgetLimited', 'complete']) {
+    goal.status = status;
+    const count = sent.filter(m => m.method === 'thread/goal/set').length;
+    await service.dispatch({ ...message, command: 'goal_resume', turnId: 'failed' }, r => replies.push(r));
+    assert.ok(replies.at(-1).error);
+    assert.equal(sent.filter(m => m.method === 'thread/goal/set').length, count);
+  }
+  goal.status = 'paused'; snapshot = { turnId: 'new', status: 'inProgress' };
+  const count = sent.length;
+  await service.dispatch({ ...message, command: 'goal_resume', turnId: 'failed' }, r => replies.push(r));
+  assert.equal(sent.length, count);
+  config = { enabled: false, targets: { allowed: { enabled: true } } };
+  snapshot = { turnId: 'failed', status: 'failed' };
+  await service.dispatch({ ...message, command: 'goal_resume', turnId: 'failed' }, r => replies.push(r));
+  assert.equal(sent.length, count);
+  goal = null;
+  await service.dispatch(message, r => replies.push(r));
+  assert.deepEqual(replies.at(-1).result, { goal: null });
+});
+
 test('bridge rejects invalid token, arbitrary commands, non-targets and arbitrary extra parameters', async () => {
   const s = setup();
   for (const message of [{ ...command, token: 'wrong' }, { ...command, command: 'turn/start' },

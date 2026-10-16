@@ -10,7 +10,7 @@ export class NativeClient {
   }
 
   command(command, threadId, turnId) {
-    if (!['snapshot', 'compact', 'interrupt'].includes(command) || typeof threadId !== 'string' || !threadId) {
+    if (!['snapshot', 'compact', 'interrupt', 'goal_get', 'goal_resume'].includes(command) || typeof threadId !== 'string' || !threadId) {
       return Promise.reject(Error('Invalid native bridge command'));
     }
     return new Promise((resolve, reject) => {

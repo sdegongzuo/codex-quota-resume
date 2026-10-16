@@ -4,6 +4,19 @@ import net from 'node:net';
 import { randomUUID } from 'node:crypto';
 import { Desktop } from '../scripts/desktop.mjs';
 
+test('目标控制要求认证桥接能力，明确null才能认定没有目标', async () => {
+  const desktop = new Desktop({ pipe: 'fixture', callerThread: 'owner' });
+  await assert.rejects(desktop.getTargetGoal('target'), { code: 'DESKTOP_TOOL_UNAVAILABLE' });
+  desktop.native = { verified: true, goalControlVerified: false, getGoal: async () => ({ goal: null }) };
+  await assert.rejects(desktop.getTargetGoal('target'), { code: 'DESKTOP_TOOL_UNAVAILABLE' });
+  desktop.native.goalControlVerified = true;
+  assert.equal(await desktop.getTargetGoal('target'), null);
+  desktop.native.getGoal = async () => ({});
+  await assert.rejects(desktop.getTargetGoal('target'), { code: 'DESKTOP_INVALID_RESPONSE' });
+  desktop.native.resumeGoal = async () => ({ goal: { threadId: 'other', status: 'active' } });
+  await assert.rejects(desktop.resumeTargetGoal('target', 'failed'), { code: 'DESKTOP_INVALID_RESPONSE' });
+});
+
 test('命名管道分片响应与工具路由保持原聊天身份', async () => {
   const pipe = process.platform === 'win32' ? `\\\\.\\pipe\\quota-test-${randomUUID()}` : undefined;
   if (!pipe) return;
