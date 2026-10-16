@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, appendFileSync } from 'node:fs';
+import { existsSync, readFileSync, appendFileSync, openSync, closeSync, fstatSync, readSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 
 export const taskId = (accountId, hostId, threadId, turnId) => createHash('sha256')
@@ -12,6 +12,32 @@ export function records(path) {
   return readFileSync(path, 'utf8').split('\n').flatMap(line => {
     try { return [JSON.parse(line)]; } catch { return []; }
   });
+}
+
+// Read snapshots backwards without decoding the entire append-only history.
+export function latestRecord(path) {
+  let fd;
+  try { fd = openSync(path, 'r'); }
+  catch (error) { if (error.code === 'ENOENT') return undefined; throw error; }
+  try {
+    let position = fstatSync(fd).size;
+    let suffix = Buffer.alloc(0);
+    const block = Buffer.alloc(64 * 1024);
+    while (position > 0) {
+      const length = Math.min(position, block.length);
+      position -= length;
+      const count = readSync(fd, block, 0, length, position);
+      const data = Buffer.concat([block.subarray(0, count), suffix]);
+      let end = data.length;
+      for (let index = data.length - 1; index >= 0; index--) {
+        if (data[index] !== 10) continue;
+        try { return JSON.parse(data.subarray(index + 1, end).toString('utf8')); } catch {}
+        end = index;
+      }
+      suffix = Buffer.from(data.subarray(0, end));
+    }
+    try { return JSON.parse(suffix.toString('utf8')); } catch { return undefined; }
+  } finally { closeSync(fd); }
 }
 
 export function append(path, value) {

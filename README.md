@@ -137,6 +137,8 @@ rtk proxy node "D:\dev\codex-quota-resume\scripts\control.mjs" disable
 
 执行测试：
 
+状态持久化与历史保留规则见 [状态日志存储](docs/状态日志存储.md)。当前后台使用分段差量日志，旧 `state.jsonl` 保留但不再追加。
+
 ```powershell
 rtk proxy node --test "D:\dev\codex-quota-resume\tests\engine.test.mjs" "D:\dev\codex-quota-resume\tests\desktop.test.mjs" "D:\dev\codex-quota-resume\tests\store.test.mjs"
 ```

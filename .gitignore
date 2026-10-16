@@ -15,6 +15,8 @@ data/
 runtime.json
 config.jsonl
 state.jsonl
+state.jsonl.journal/
+event-logs/
 events.jsonl
 native-operations.jsonl
 

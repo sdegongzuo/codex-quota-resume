@@ -4,7 +4,20 @@ import { mkdirSync, appendFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import { append, records, configuration, migrateState, taskId, shouldLaunchWatcher } from '../scripts/store.mjs';
+import { append, records, latestRecord, configuration, migrateState, taskId, shouldLaunchWatcher } from '../scripts/store.mjs';
+
+test('latest snapshot skips partial trailing records and preserves multiblock UTF-8', () => {
+  const dir = resolve(dirname(fileURLToPath(import.meta.url)), '../.test-evidence', randomUUID());
+  mkdirSync(dir, { recursive: true });
+  const path = resolve(dir, 'state.jsonl');
+  assert.equal(latestRecord(path), undefined);
+  append(path, { old: true });
+  const snapshot = { text: '状态'.repeat(40000), pending: {} };
+  append(path, snapshot);
+  appendFileSync(path, '\n{"partial":');
+  assert.deepEqual(latestRecord(path), snapshot);
+  assert.deepEqual(latestRecord(path), records(path).at(-1));
+});
 
 test('多个聊天登记均保留，部分损坏记录不覆盖有效状态', () => {
   const dir = resolve(dirname(fileURLToPath(import.meta.url)), '../.test-evidence', randomUUID());

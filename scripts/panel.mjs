@@ -1,8 +1,9 @@
 import { createServer } from 'node:http';
 import { renderPanel } from './panel-view.mjs';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { records, append, configuration, taskId } from './store.mjs';
+import { append, configuration, taskId } from './store.mjs';
 import { safeDesktopDiagnostic } from './desktop.mjs';
+import { readState } from './state-store.mjs';
 import { panelQuota } from './quota-view.mjs';
 
 export function panelConnection(connection, now = Date.now() / 1000) {
@@ -84,7 +85,7 @@ export function startPanel({ host = '127.0.0.1', port = 0, accessToken, configPa
     if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) return json(response, 403, { error: '令牌无效' });
     const config = configuration(configPath);
     if (request.method === 'GET' && request.url === '/api/state') {
-      const state = records(statePath).at(-1) ?? { pending: {} };
+      const state = readState(statePath) ?? { pending: {} };
       const items = projectQueue(state.pending, config, state.activeAutoResume);
       const historyItems = projectQueue(state.pending, config, state.activeAutoResume, true);
       const connection = panelConnection(state.connection);
@@ -137,14 +138,14 @@ export function startPanel({ host = '127.0.0.1', port = 0, accessToken, configPa
       if (value.enabled) await onGlobalEnabled();
     }
     else if (request.url === '/api/item' && typeof value.id === 'string' && typeof value.enabled === 'boolean') {
-      const state = records(statePath).at(-1) ?? { pending: {} };
+      const state = readState(statePath) ?? { pending: {} };
       const item = state.pending?.[value.id] ?? Object.values(state.pending ?? {}).find(candidate =>
         taskId(candidate.accountId, candidate.hostId, candidate.threadId, candidate.turnId) === value.id);
       if (!item) return json(response, 404, { error: 'queue item not found' });
       append(configPath, { type: 'item', id: value.id, value: { enabled: value.enabled } });
     } else if (request.url === '/api/stop' && typeof value.id === 'string' && typeof value.turnId === 'string') {
       if (typeof onStop !== 'function') return json(response, 501, { error: '当前安装尚未接通原生停止接口' });
-      const state = records(statePath).at(-1) ?? { pending: {} };
+      const state = readState(statePath) ?? { pending: {} };
       const item = Object.values(state.pending ?? {}).find(candidate =>
         taskId(candidate.accountId, candidate.hostId, candidate.threadId, candidate.turnId) === value.id);
       if (!item || !(item.phase === 'running' || (item.phase === 'needs_user' && state.activeAutoResume === item.id))
@@ -158,7 +159,7 @@ export function startPanel({ host = '127.0.0.1', port = 0, accessToken, configPa
         requestId: `stop:${value.id}:${value.turnId}` });
       return json(response, 200, { saved: true, operation: result });
     } else if (request.url === '/api/resolve' && typeof value.id === 'string') {
-      const state = records(statePath).at(-1) ?? { pending: {} };
+      const state = readState(statePath) ?? { pending: {} };
       const item = state.pending?.[value.id] ?? Object.values(state.pending ?? {}).find(candidate =>
         taskId(candidate.accountId, candidate.hostId, candidate.threadId, candidate.turnId) === value.id);
       if (!item || !['sending', 'uncertain'].includes(item.phase)) return json(response, 409, { error: '只有发送结果待核对的任务可请求解除等待' });

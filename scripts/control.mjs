@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, mkdirSync, existsSync, realpathSync, appendFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, realpathSync } from 'node:fs';
 import { resolve, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
@@ -8,8 +8,10 @@ import { homedir } from 'node:os';
 import { Desktop, safeDesktopDiagnostic } from './desktop.mjs';
 import { tick } from './engine.mjs';
 import { configuration, records, append, migrateState, shouldLaunchWatcher } from './store.mjs';
+import { readState, createStateWriter } from './state-store.mjs';
 import { startPanel } from './panel.mjs';
 import { connectNativeWorker } from './native-worker.mjs';
+import { createEventLogger } from './event-log.mjs';
 
 const option = name => {
   const index = process.argv.indexOf(name);
@@ -29,8 +31,7 @@ const statePath = resolve(dataDir, 'state.jsonl');
 const runtimePath = resolve(dataDir, 'runtime.json');
 const load = (path, fallback) => existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : fallback;
 const save = (path, value) => writeFileSync(path, JSON.stringify(value, null, 2) + '\n');
-const log = (event, details = {}) => appendFileSync(resolve(dataDir, 'events.jsonl'),
-  JSON.stringify({ time: new Date().toISOString(), event, ...details }) + '\n');
+const log = createEventLogger(dataDir, { autoCleanup: process.argv[2] === 'watch' });
 const now = () => Math.floor(Date.now() / 1000);
 const command = process.argv[2];
 const nativeOperationsPath = resolve(dataDir, 'native-operations.jsonl');
@@ -97,16 +98,18 @@ async function watch() {
     throw error;
   }
   save(runtimePath, { pid: process.pid, port, startedAt: now(), alive: true });
-  const migrated = migrateState(records(statePath).at(-1) ?? { pending: {}, handled: [] }, configuration(configPath));
+  const migrated = migrateState(readState(statePath) ?? { pending: {}, handled: [] }, configuration(configPath));
   const state = migrated.state;
-  if (migrated.changed) append(statePath, state);
+  const persistState = createStateWriter(statePath, { autoCleanup: true,
+    onCleanupError: error => log('log_cleanup_error', { code: error.code ?? 'CLEANUP_ERROR' }) });
+  if (migrated.changed) persistState(state);
   log('worker_started', { pid: process.pid });
   try {
     while (!stopRequested) {
       const config = configuration(configPath);
       try {
           await tick({ desktop: new Desktop({ ...config, native: await nativeBridge(config) }), config, state, now: now(),
-          persist: () => append(statePath, state), log,
+          persist: () => persistState(state), log,
           registerTarget: entry => {
             const current = configuration(configPath);
             if (!current.enabled || Object.hasOwn(current.targets, entry.threadId)) return false;
@@ -134,16 +137,17 @@ async function watch() {
           reason: requiredFailure ? `桌面读取失败：${requiredFailure.method} / ${requiredFailure.code}`
             + (state.catalogFallbackUsed ? '；已用本地日志收集中断，自动发送暂停' : '')
             : failedTargets.length ? `${failedTargets.length} 个聊天读取失败：${firstTargetFailure.method} / ${firstTargetFailure.code}；其他聊天继续监测` : null };
-        append(statePath, state);
+        persistState(state);
       } catch (error) {
         const diagnostic = safeDesktopDiagnostic(error);
         state.connection = { status: 'unavailable', observedAt: now(), ...diagnostic,
           reason: `桌面读取失败：${diagnostic.method} / ${diagnostic.code}` };
-        try { append(statePath, state); } catch (persistError) {
+        try { persistState(state); } catch (persistError) {
           log('connection_state_persist_error', { code: persistError.code ?? 'WRITE_ERROR' });
         }
         log('poll_error', { ...diagnostic, reason: '桌面连接或数据读取失败' });
       }
+      log.cleanup();
       await new Promise(resolvePromise => setTimeout(resolvePromise, config.intervalSeconds * 1000));
     }
   } finally {
@@ -183,7 +187,7 @@ if (command === 'enable') {
   }
 } else if (command === 'resolve') {
   const id = option('--item');
-  const state = records(statePath).at(-1) ?? { pending: {} };
+  const state = readState(statePath) ?? { pending: {} };
   const item = state.pending?.[id];
   if (!id || !item || !['sending', 'uncertain'].includes(item.phase)) {
     throw new Error('用法: resolve --item <sending/uncertain任务ID>');
@@ -256,7 +260,7 @@ if (command === 'enable') {
   console.log(JSON.stringify({ enabled: config.enabled, targets: config.targets,
     settings: { compactionThresholdRatio: config.compactionThresholdRatio,
       resumeBufferSeconds: config.resumeBufferSeconds, recoveryRetrySeconds: config.recoveryRetrySeconds },
-    running, runtime, state: records(statePath).at(-1) ?? null, dataDir }, null, 2));
+    running, runtime, state: readState(statePath) ?? null, dataDir }, null, 2));
 } else if (command === 'watch') {
   await watch();
 } else if (command === 'probe') {
